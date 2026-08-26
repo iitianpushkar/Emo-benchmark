@@ -1,0 +1,35 @@
+model:
+  id: Qwen/Qwen2.5-VL-3B-Instruct
+  dtype: float16
+  device_map: auto
+
+dataset:
+  root: dataset/MELD.Raw
+  labels:
+    - anger
+    - disgust
+    - fear
+    - joy
+    - neutral
+    - sadness
+    - surprise
+
+video:
+  fps: 6
+  max_frames: 64
+  frame_size: 224
+
+embeddings:
+  output_dir: embeddings/qwen2_5_vl_3b
+  pooling: mean
+
+training:
+  batch_size: 64
+  epochs: 50
+  learning_rate: 0.0003
+  hidden_dim: 512
+  dropout: 0.3
+  seed: 42
+
+outputs:
+  output_dir: outputs/qwen2_5_vl_3b

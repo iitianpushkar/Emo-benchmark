@@ -1,0 +1,17 @@
+# Local datasets and generated artifacts
+dataset/*
+!dataset/.gitkeep
+
+embeddings/*
+!embeddings/.gitkeep
+
+outputs/*
+!outputs/.gitkeep
+
+# Python / notebook cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
