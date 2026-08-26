@@ -36,3 +36,36 @@ Generated embeddings and results are also ignored by Git:
 embeddings/
 outputs/
 ```
+
+
+## Environment setup
+
+For Colab, install dependencies at the top of the notebook:
+
+```bash
+pip install -r requirements.txt
+```
+
+For local development, create a virtual environment first:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+The `.venv/` folder is ignored by Git.
+
+## Prepare MELD indexes
+
+After placing `MELD.Raw` under `dataset/`, build verified split indexes:
+
+```bash
+python scripts/prepare_meld.py --meld-root dataset/MELD.Raw --split all
+```
+
+For a quick smoke test, limit rows per split:
+
+```bash
+python scripts/prepare_meld.py --meld-root dataset/MELD.Raw --split train --limit 100
+```

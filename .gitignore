@@ -8,6 +8,10 @@ embeddings/*
 outputs/*
 !outputs/.gitkeep
 
+# Python environment
+.venv/
+venv/
+
 # Python / notebook cache
 __pycache__/
 *.py[cod]
