@@ -70,14 +70,42 @@ For a quick smoke test, limit rows per split:
 python scripts/prepare_meld.py --meld-root dataset/MELD.Raw --split train --limit 100
 ```
 
+
+## Preprocess video frames
+
+Optionally decode and cache sampled video frames before GPU embedding extraction. This is useful on Kaggle because video decoding is CPU-heavy.
+
+```bash
+python scripts/preprocess_meld_frames.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-dir processed_frames/qwen2_5_vl_3b/train \
+  --output-index outputs/indexes/meld_train_frames_index.csv \
+  --fps 6 \
+  --frame-size 224 \
+  --max-frames 64
+```
+
+Each saved frame file contains a `torch.uint8` tensor with shape `[T, H, W, 3]` in RGB order. Qwen's processor later converts these frames to normalized floating-point model inputs.
+
 ## Extract Qwen video embeddings
 
-Extract frozen Qwen2.5-VL video embeddings before language generation:
+Extract frozen Qwen2.5-VL video embeddings before language generation. If you already ran frame preprocessing, use the frame index so GPU extraction does not decode videos again:
+
+```bash
+python scripts/extract_qwen_embeddings.py \
+  --index-csv outputs/indexes/meld_train_frames_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b/meld_train_100.pt \
+  --input-mode frames \
+  --limit 100
+```
+
+You can still decode videos live by using the original MELD index:
 
 ```bash
 python scripts/extract_qwen_embeddings.py \
   --index-csv outputs/indexes/meld_train_index.csv \
   --output-pt embeddings/qwen2_5_vl_3b/meld_train_100.pt \
+  --input-mode video \
   --fps 6 \
   --max-frames 64 \
   --limit 100

@@ -8,6 +8,9 @@ embeddings/*
 outputs/*
 !outputs/.gitkeep
 
+processed_frames/*
+!processed_frames/.gitkeep
+
 # Python environment
 .venv/
 venv/
