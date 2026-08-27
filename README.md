@@ -99,3 +99,17 @@ python scripts/train_mlp.py \
 ```
 
 Under the hood, the trainer standardizes embeddings using train-set mean/std, trains a one-hidden-layer MLP, and selects the best checkpoint by dev macro F1.
+
+## Evaluate saved MLP
+
+Evaluate a trained checkpoint on dev or test embeddings without retraining:
+
+```bash
+python scripts/evaluate_mlp.py \
+  --checkpoint outputs/qwen2_5_vl_3b/best_mlp.pt \
+  --embeddings-pt embeddings/qwen2_5_vl_3b/meld_test.pt \
+  --output-dir outputs/qwen2_5_vl_3b \
+  --split-name test
+```
+
+Under the hood, this reloads the MLP, applies the train-set feature mean/std saved in the checkpoint, and writes metrics plus per-sample predictions.
