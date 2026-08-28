@@ -49,6 +49,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Optional number of rows to process.")
     parser.add_argument("--start", type=int, default=0, help="Start row offset in index CSV.")
     parser.add_argument("--batch-save-every", type=int, default=25, help="Save checkpoint after this many samples.")
+    parser.add_argument("--gc-every", type=int, default=10, help="Run Python/CUDA cleanup after this many samples.")
+    parser.add_argument(
+        "--save-dtype",
+        choices=["float16", "float32"],
+        default="float16",
+        help="Dtype used for saved embeddings. train_mlp.py converts them back to float32 while training.",
+    )
+    parser.add_argument(
+        "--skip-decord-precheck",
+        action="store_true",
+        help="Do not pre-open videos with decord before Qwen processing. Precheck skips corrupted MP4s earlier.",
+    )
     parser.add_argument(
         "--layer",
         type=int,
@@ -129,6 +141,33 @@ def fix_video_kwargs(video_kwargs: dict[str, Any]) -> dict[str, Any]:
     return fixed
 
 
+def precheck_video_with_decord(video_path: str) -> None:
+    """Fail early on corrupt MP4s so qwen-vl-utils does not fall back to slower torchvision decoding."""
+    try:
+        from decord import VideoReader, cpu
+    except ImportError:
+        return
+
+    vr = VideoReader(video_path, ctx=cpu(0))
+    if len(vr) <= 0:
+        raise ValueError(f"No decodable frames found: {video_path}")
+    del vr
+
+
+def cleanup_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def save_embedding_dtype(name: str) -> torch.dtype:
+    if name == "float16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"Unknown save dtype: {name}")
+
+
 def pool_hidden_states(hidden: torch.Tensor, attention_mask: torch.Tensor, mode: str) -> torch.Tensor:
     """Pool [1, seq_len, hidden_dim] into [hidden_dim] using non-padding tokens."""
     if hidden.ndim != 3 or hidden.shape[0] != 1:
@@ -148,20 +187,23 @@ def pool_hidden_states(hidden: torch.Tensor, attention_mask: torch.Tensor, mode:
     raise ValueError(f"Unknown pooling mode: {mode}")
 
 
-def forward_multimodal_hidden_states(
+def forward_multimodal_hidden_state(
     model: Qwen2_5_VLForConditionalGeneration,
     inputs: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, ...]:
-    """Return shared transformer hidden states before Qwen's LM head when possible."""
+    layer: int,
+) -> torch.Tensor:
+    """Return one shared transformer hidden-state tensor before Qwen's LM head."""
     base_model = getattr(model, "model", None)
     if base_model is not None:
         outputs = base_model(
             **inputs,
-            output_hidden_states=True,
+            output_hidden_states=(layer != -1),
             use_cache=False,
             return_dict=True,
         )
-        return outputs.hidden_states
+        if layer == -1:
+            return outputs.last_hidden_state
+        return outputs.hidden_states[layer]
 
     # Fallback for unusual wrappers. logits_to_keep=1 reduces LM-head memory on newer transformers.
     try:
@@ -179,7 +221,7 @@ def forward_multimodal_hidden_states(
             use_cache=False,
             return_dict=True,
         )
-    return outputs.hidden_states
+    return outputs.hidden_states[layer]
 
 
 def extract_shared_embedding(
@@ -210,14 +252,16 @@ def extract_shared_embedding(
         **video_kwargs,
     ).to(model.device)
 
-    with torch.inference_mode():
-        hidden_states = forward_multimodal_hidden_states(model, inputs)
+    try:
+        with torch.inference_mode():
+            hidden = forward_multimodal_hidden_state(model, inputs, layer)
 
-    hidden = hidden_states[layer]
-    embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
-
-    del inputs, hidden_states, hidden
-    torch.cuda.empty_cache()
+        embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
+    finally:
+        del messages, text, image_inputs, video_inputs, video_kwargs, inputs
+        if "hidden" in locals():
+            del hidden
+        cleanup_memory()
 
     return embedding
 
@@ -276,6 +320,8 @@ def main() -> None:
     processor = AutoProcessor.from_pretrained(args.model_id, **processor_kwargs)
     model.eval()
 
+    output_dtype = save_embedding_dtype(args.save_dtype)
+
     embeddings: list[torch.Tensor] = []
     labels: list[int] = []
     sample_ids: list[str] = []
@@ -290,6 +336,8 @@ def main() -> None:
         try:
             if not Path(video_path).exists():
                 raise FileNotFoundError(video_path)
+            if not args.skip_decord_precheck:
+                precheck_video_with_decord(video_path)
             embedding = extract_shared_embedding(
                 model=model,
                 processor=processor,
@@ -304,7 +352,7 @@ def main() -> None:
                 prompt_style=args.prompt_style,
                 add_generation_prompt=not args.no_generation_prompt,
             )
-            embeddings.append(embedding)
+            embeddings.append(embedding.to(dtype=output_dtype))
             labels.append(int(row["emotion_id"]))
             sample_ids.append(sample_id)
             metadata.append(row.to_dict())
@@ -313,6 +361,9 @@ def main() -> None:
             errors.append({"sample_id": sample_id, "video_path": video_path, "error": "CUDA OOM"})
         except Exception as exc:
             errors.append({"sample_id": sample_id, "video_path": video_path, "error": repr(exc)})
+
+        if args.gc_every > 0 and ((len(embeddings) + len(errors)) % args.gc_every == 0):
+            cleanup_memory()
 
         if embeddings and (len(embeddings) % args.batch_save_every == 0):
             payload = {
