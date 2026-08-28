@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Optional number of rows to process.")
     parser.add_argument("--start", type=int, default=0, help="Start row offset in index CSV.")
     parser.add_argument("--batch-save-every", type=int, default=25, help="Save checkpoint after this many samples.")
+    parser.add_argument("--resume", action="store_true", help="Resume from an existing output .pt file and skip completed samples.")
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="When resuming, retry samples that were saved as errors instead of skipping them.",
+    )
     parser.add_argument("--gc-every", type=int, default=10, help="Run Python/CUDA cleanup after this many samples.")
     parser.add_argument(
         "--save-dtype",
@@ -166,6 +172,44 @@ def save_embedding_dtype(name: str) -> torch.dtype:
     if name == "float32":
         return torch.float32
     raise ValueError(f"Unknown save dtype: {name}")
+
+
+def load_resume_payload(
+    path: Path,
+    output_dtype: torch.dtype,
+    retry_errors: bool,
+) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
+    if not path.exists():
+        return [], [], [], [], [], set()
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if "embeddings" not in payload or "labels" not in payload or "sample_ids" not in payload:
+        raise ValueError(f"Cannot resume from {path}; missing embeddings, labels, or sample_ids")
+
+    embeddings_tensor = payload["embeddings"].cpu().to(dtype=output_dtype)
+    labels_tensor = payload["labels"].cpu().long()
+    sample_ids = [str(item) for item in payload.get("sample_ids", [])]
+    metadata = list(payload.get("metadata", [{} for _ in sample_ids]))
+    errors = list(payload.get("errors", []))
+
+    if embeddings_tensor.shape[0] != len(sample_ids):
+        raise ValueError(
+            f"Cannot resume from {path}; embeddings rows ({embeddings_tensor.shape[0]}) "
+            f"do not match sample_ids ({len(sample_ids)})"
+        )
+    if labels_tensor.shape[0] != len(sample_ids):
+        raise ValueError(
+            f"Cannot resume from {path}; label rows ({labels_tensor.shape[0]}) "
+            f"do not match sample_ids ({len(sample_ids)})"
+        )
+
+    done_ids = set(sample_ids)
+    if not retry_errors:
+        done_ids.update(str(error.get("sample_id")) for error in errors if error.get("sample_id"))
+
+    embeddings = [embeddings_tensor[i] for i in range(embeddings_tensor.shape[0])]
+    labels = labels_tensor.tolist()
+    return embeddings, labels, sample_ids, metadata, errors, done_ids
 
 
 def pool_hidden_states(hidden: torch.Tensor, attention_mask: torch.Tensor, mode: str) -> torch.Tensor:
@@ -322,16 +366,27 @@ def main() -> None:
 
     output_dtype = save_embedding_dtype(args.save_dtype)
 
-    embeddings: list[torch.Tensor] = []
-    labels: list[int] = []
-    sample_ids: list[str] = []
-    metadata: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
+    if args.resume:
+        embeddings, labels, sample_ids, metadata, errors, done_ids = load_resume_payload(
+            args.output_pt, output_dtype=output_dtype, retry_errors=args.retry_errors
+        )
+        print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
+        print(f"Resume skip set: {len(done_ids)} sample ids")
+    else:
+        embeddings: list[torch.Tensor] = []
+        labels: list[int] = []
+        sample_ids: list[str] = []
+        metadata: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        done_ids: set[str] = set()
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
         video_path = str(row["video_path"])
         utterance = str(row["utterance"])
         sample_id = str(row["sample_id"])
+
+        if sample_id in done_ids:
+            continue
 
         try:
             if not Path(video_path).exists():
@@ -356,11 +411,16 @@ def main() -> None:
             labels.append(int(row["emotion_id"]))
             sample_ids.append(sample_id)
             metadata.append(row.to_dict())
+            done_ids.add(sample_id)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             errors.append({"sample_id": sample_id, "video_path": video_path, "error": "CUDA OOM"})
+            if not args.retry_errors:
+                done_ids.add(sample_id)
         except Exception as exc:
             errors.append({"sample_id": sample_id, "video_path": video_path, "error": repr(exc)})
+            if not args.retry_errors:
+                done_ids.add(sample_id)
 
         if args.gc_every > 0 and ((len(embeddings) + len(errors)) % args.gc_every == 0):
             cleanup_memory()
@@ -379,6 +439,9 @@ def main() -> None:
 
     if not embeddings:
         raise RuntimeError(f"No embeddings were extracted. First errors: {errors[:5]}")
+
+    print(f"Completed embeddings in output: {len(embeddings)}")
+    print(f"Tracked skipped/completed sample ids: {len(done_ids)}")
 
     payload = {
         "embeddings": torch.stack(embeddings),

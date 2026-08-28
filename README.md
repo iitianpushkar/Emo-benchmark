@@ -103,6 +103,48 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
 
+If Kaggle stops a long extraction run, rerun the same command with `--resume`. Existing `sample_ids` in the output file are skipped, so only missing clips are extracted:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_shared/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --resume
+```
+
+Previous error samples are skipped during resume by default. Add `--retry-errors` if you want to attempt them again.
+
+For long Kaggle runs, prefer chunked extraction. Each chunk launches a fresh Python process, so RAM is released between chunks:
+
+```bash
+python scripts/run_qwen_shared_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/qwen2_5_vl_3b_shared_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5
+```
+
+After all chunks finish, merge them into the single file expected by `train_mlp.py`:
+
+```bash
+python scripts/merge_embedding_chunks.py \
+  --chunks-dir embeddings/qwen2_5_vl_3b_shared_chunks/train \
+  --output-pt embeddings/qwen2_5_vl_3b_shared/meld_train.pt \
+  --pattern "train_*.pt"
+```
+
 ## Train MLP classifier
 
 After extracting embeddings for train and dev splits, train the lightweight classifier:
