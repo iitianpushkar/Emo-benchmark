@@ -120,7 +120,7 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 Previous error samples are skipped during resume by default. Add `--retry-errors` if you want to attempt them again.
 
-For long Kaggle runs, prefer chunked extraction. Each chunk launches a fresh Python process, so RAM is released between chunks:
+For long Kaggle runs, prefer chunked extraction. Each chunk launches a fresh Python process, so RAM is released between chunks. If a partial merged file already exists, `--seed-pt` copies its existing `sample_ids` into the matching chunk files first:
 
 ```bash
 python scripts/run_qwen_shared_chunks.py \
@@ -128,6 +128,7 @@ python scripts/run_qwen_shared_chunks.py \
   --chunks-dir embeddings/qwen2_5_vl_3b_shared_chunks/train \
   --chunk-prefix train \
   --chunk-size 500 \
+  --seed-pt embeddings/qwen2_5_vl_3b_shared/meld_train.pt \
   --fps 6 \
   --max-frames 64 \
   --pooling last \
