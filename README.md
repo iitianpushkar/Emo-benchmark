@@ -86,6 +86,23 @@ python scripts/extract_qwen_embeddings.py \
 
 The extractor uses Qwen as a frozen visual representation model and does not call `model.generate()`.
 
+## Extract shared Qwen video+utterance embeddings
+
+To include the MELD utterance with the corresponding video, use the shared extractor:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_shared/meld_train_100.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --limit 100
+```
+
+This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
+
 ## Train MLP classifier
 
 After extracting embeddings for train and dev splits, train the lightweight classifier:
