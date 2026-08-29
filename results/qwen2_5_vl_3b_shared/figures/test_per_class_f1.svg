@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="30" text-anchor="middle" font-family="Arial" font-size="22" font-weight="700">Test Per-Class F1</text>
+<line x1="70" x2="870" y1="55.0" y2="55.0" stroke="#e5e7eb"/>
+<text x="60" y="59.0" text-anchor="end" font-family="Arial" font-size="12">0.85</text>
+<line x1="70" x2="870" y1="129.0" y2="129.0" stroke="#e5e7eb"/>
+<text x="60" y="133.0" text-anchor="end" font-family="Arial" font-size="12">0.68</text>
+<line x1="70" x2="870" y1="203.0" y2="203.0" stroke="#e5e7eb"/>
+<text x="60" y="207.0" text-anchor="end" font-family="Arial" font-size="12">0.51</text>
+<line x1="70" x2="870" y1="277.0" y2="277.0" stroke="#e5e7eb"/>
+<text x="60" y="281.0" text-anchor="end" font-family="Arial" font-size="12">0.34</text>
+<line x1="70" x2="870" y1="351.0" y2="351.0" stroke="#e5e7eb"/>
+<text x="60" y="355.0" text-anchor="end" font-family="Arial" font-size="12">0.17</text>
+<line x1="70" x2="870" y1="425.0" y2="425.0" stroke="#e5e7eb"/>
+<text x="60" y="429.0" text-anchor="end" font-family="Arial" font-size="12">0.00</text>
+<rect x="90.0" y="232.9" width="74.3" height="192.1" fill="#4C78A8" rx="3"/>
+<text x="127.1" y="224.9" text-anchor="middle" font-family="Arial" font-size="12">0.44</text>
+<text transform="translate(127.1 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">anger</text>
+<rect x="204.3" y="337.8" width="74.3" height="87.2" fill="#F58518" rx="3"/>
+<text x="241.4" y="329.8" text-anchor="middle" font-family="Arial" font-size="12">0.20</text>
+<text transform="translate(241.4 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">disgust</text>
+<rect x="318.6" y="321.6" width="74.3" height="103.4" fill="#E45756" rx="3"/>
+<text x="355.7" y="313.6" text-anchor="middle" font-family="Arial" font-size="12">0.24</text>
+<text transform="translate(355.7 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">fear</text>
+<rect x="432.9" y="169.4" width="74.3" height="255.6" fill="#72B7B2" rx="3"/>
+<text x="470.0" y="161.4" text-anchor="middle" font-family="Arial" font-size="12">0.59</text>
+<text transform="translate(470.0 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">joy</text>
+<rect x="547.1" y="103.3" width="74.3" height="321.7" fill="#54A24B" rx="3"/>
+<text x="584.3" y="95.3" text-anchor="middle" font-family="Arial" font-size="12">0.74</text>
+<text transform="translate(584.3 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">neutral</text>
+<rect x="661.4" y="287.3" width="74.3" height="137.7" fill="#B279A2" rx="3"/>
+<text x="698.6" y="279.3" text-anchor="middle" font-family="Arial" font-size="12">0.32</text>
+<text transform="translate(698.6 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">sadness</text>
+<rect x="775.7" y="199.7" width="74.3" height="225.3" fill="#FF9DA6" rx="3"/>
+<text x="812.9" y="191.7" text-anchor="middle" font-family="Arial" font-size="12">0.52</text>
+<text transform="translate(812.9 465) rotate(-30)" text-anchor="end" font-family="Arial" font-size="13">surprise</text>
+<line x1="70" x2="870" y1="425" y2="425" stroke="#222"/>
+<line x1="70" x2="70" y1="55" y2="425" stroke="#222"/>
+<text transform="translate(20 260.0) rotate(-90)" text-anchor="middle" font-family="Arial" font-size="14">F1-score</text>
+</svg>

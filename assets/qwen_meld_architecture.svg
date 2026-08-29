@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">MELD Qwen shared embedding benchmark architecture</title>
+  <desc id="desc">Architecture diagram showing MELD video and utterance inputs, Qwen video processing, shared multimodal transformer embedding extraction, pooling, MLP classifier, and evaluation metrics.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="13" markerHeight="10" refX="11" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <linearGradient id="videoGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#dbeafe"/>
+      <stop offset="1" stop-color="#bfdbfe"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#dcfce7"/>
+      <stop offset="1" stop-color="#bbf7d0"/>
+    </linearGradient>
+    <linearGradient id="qwenGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#eef2ff"/>
+      <stop offset="1" stop-color="#ddd6fe"/>
+    </linearGradient>
+    <linearGradient id="headGrad" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#fff7ed"/>
+      <stop offset="1" stop-color="#fed7aa"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.13"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .card { stroke: #cbd5e1; stroke-width: 2.2; filter: url(#shadow); }
+      .small { font: 500 18px Inter, Arial, sans-serif; fill: #475569; }
+      .label { font: 700 25px Inter, Arial, sans-serif; fill: #334155; }
+      .title { font: 800 34px Inter, Arial, sans-serif; fill: #0f172a; }
+      .sub { font: 500 19px Inter, Arial, sans-serif; fill: #64748b; }
+      .tiny { font: 600 15px Inter, Arial, sans-serif; fill: #64748b; }
+      .mono { font: 700 17px Menlo, Consolas, monospace; fill: #334155; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 3.2; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #94a3b8; stroke-width: 2.4; stroke-dasharray: 7 7; }
+      .freeze { font: 700 16px Inter, Arial, sans-serif; fill: #64748b; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1280" height="760" rx="28"/>
+  <text class="title" x="640" y="58" text-anchor="middle">Qwen2.5-VL Shared Embedding Benchmark</text>
+  <text class="sub" x="640" y="91" text-anchor="middle">MELD video clips and utterances are encoded by frozen Qwen, then a lightweight MLP learns emotion labels.</text>
+
+  <g transform="translate(60 170)">
+    <rect class="card" x="0" y="0" width="210" height="132" rx="22" fill="url(#videoGrad)"/>
+    <text class="label" x="105" y="54" text-anchor="middle">MELD Video</text>
+    <text class="small" x="105" y="88" text-anchor="middle">dia*_utt*.mp4</text>
+    <text class="tiny" x="105" y="114" text-anchor="middle">sample frames @ fps</text>
+  </g>
+
+  <g transform="translate(60 420)">
+    <rect class="card" x="0" y="0" width="210" height="132" rx="22" fill="url(#textGrad)"/>
+    <text class="label" x="105" y="50" text-anchor="middle">Utterance</text>
+    <text class="small" x="105" y="84" text-anchor="middle">speaker text</text>
+    <text class="tiny" x="105" y="112" text-anchor="middle">emotion-task prompt</text>
+  </g>
+
+  <path class="arrow" d="M 270 236 C 330 236, 345 236, 400 236"/>
+  <path class="arrow" d="M 270 486 C 330 486, 345 486, 400 486"/>
+
+  <g transform="translate(400 162)">
+    <rect class="card" x="0" y="0" width="220" height="150" rx="26" fill="#e2e8f0"/>
+    <text class="label" x="110" y="56" text-anchor="middle">Qwen Video</text>
+    <text class="label" x="110" y="88" text-anchor="middle">Processor</text>
+    <text class="tiny" x="110" y="119" text-anchor="middle">visual tokens + grid</text>
+  </g>
+
+  <g transform="translate(400 412)">
+    <rect class="card" x="0" y="0" width="220" height="150" rx="26" fill="#e2e8f0"/>
+    <text class="label" x="110" y="56" text-anchor="middle">Qwen Text</text>
+    <text class="label" x="110" y="88" text-anchor="middle">Tokenizer</text>
+    <text class="tiny" x="110" y="119" text-anchor="middle">input ids + mask</text>
+  </g>
+
+  <path class="arrow" d="M 620 237 C 675 237, 685 286, 735 316"/>
+  <path class="arrow" d="M 620 487 C 675 487, 685 438, 735 408"/>
+
+  <g transform="translate(735 245)">
+    <rect class="card" x="0" y="0" width="260" height="235" rx="32" fill="url(#qwenGrad)"/>
+    <text class="label" x="130" y="58" text-anchor="middle">Frozen Qwen</text>
+    <text class="label" x="130" y="90" text-anchor="middle">Multimodal</text>
+    <text class="label" x="130" y="122" text-anchor="middle">Transformer</text>
+    <line x1="46" y1="146" x2="214" y2="146" stroke="#a5b4fc" stroke-width="2"/>
+    <text class="mono" x="130" y="178" text-anchor="middle">last_hidden_state</text>
+    <text class="tiny" x="130" y="207" text-anchor="middle">2048-d shared space</text>
+  </g>
+
+  <path class="dash" d="M 760 502 L 970 502"/>
+  <text class="freeze" x="865" y="531" text-anchor="middle">Qwen weights frozen</text>
+
+  <path class="arrow" d="M 995 363 C 1035 363, 1050 363, 1085 363"/>
+
+  <g transform="translate(1085 270)">
+    <circle cx="76" cy="76" r="70" fill="#fff7ed" stroke="#fb923c" stroke-width="3" filter="url(#shadow)"/>
+    <text class="label" x="76" y="67" text-anchor="middle">Pool</text>
+    <text class="small" x="76" y="101" text-anchor="middle">last token</text>
+  </g>
+
+  <path class="arrow" d="M 1161 416 L 1161 492"/>
+
+  <g transform="translate(1034 492)">
+    <rect class="card" x="0" y="0" width="254" height="112" rx="22" fill="url(#headGrad)"/>
+    <text class="label" x="127" y="47" text-anchor="middle">MLP Classifier</text>
+    <text class="mono" x="127" y="80" text-anchor="middle">2048 -> 512 -> 7</text>
+  </g>
+
+  <path class="arrow" d="M 1034 548 C 950 548, 930 604, 848 604"/>
+
+  <g transform="translate(575 560)">
+    <rect class="card" x="0" y="0" width="273" height="112" rx="22" fill="#ecfeff"/>
+    <text class="label" x="136.5" y="43" text-anchor="middle">Evaluation</text>
+    <text class="small" x="136.5" y="77" text-anchor="middle">accuracy, macro F1</text>
+  </g>
+
+  <g transform="translate(330 635)">
+    <rect x="0" y="0" width="260" height="48" rx="24" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2"/>
+    <text class="tiny" x="130" y="30" text-anchor="middle">No Qwen fine-tuning or generation</text>
+  </g>
+</svg>

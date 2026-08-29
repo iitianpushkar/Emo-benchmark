@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="30" text-anchor="middle" font-family="Arial" font-size="22" font-weight="700">MLP Training Loss</text>
+<line x1="75" x2="870" y1="55.0" y2="55.0" stroke="#e5e7eb"/>
+<text x="65" y="59.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">3.11</text>
+<line x1="75" x2="870" y1="135.0" y2="135.0" stroke="#e5e7eb"/>
+<text x="65" y="139.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">2.54</text>
+<line x1="75" x2="870" y1="215.0" y2="215.0" stroke="#e5e7eb"/>
+<text x="65" y="219.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">1.97</text>
+<line x1="75" x2="870" y1="295.0" y2="295.0" stroke="#e5e7eb"/>
+<text x="65" y="299.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">1.40</text>
+<line x1="75" x2="870" y1="375.0" y2="375.0" stroke="#e5e7eb"/>
+<text x="65" y="379.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">0.82</text>
+<line x1="75" x2="870" y1="455.0" y2="455.0" stroke="#e5e7eb"/>
+<text x="65" y="459.0" text-anchor="end" font-family="Arial" font-size="12" fill="#444">0.25</text>
+<line x1="75" x2="870" y1="455" y2="455" stroke="#222"/>
+<line x1="75" x2="75" y1="55" y2="455" stroke="#222"/>
+<text x="450.0" y="500" text-anchor="middle" font-family="Arial" font-size="14">Epoch</text>
+<text transform="translate(20 260.0) rotate(-90)" text-anchor="middle" font-family="Arial" font-size="14">Loss</text>
+<polyline points="75.0,265.7 91.2,292.9 107.4,307.9 123.7,316.1 139.9,326.6 156.1,333.9 172.3,343.1 188.6,346.1 204.8,349.7 221.0,356.8 237.2,366.4 253.5,369.9 269.7,376.2 285.9,383.1 302.1,387.1 318.4,391.3 334.6,392.4 350.8,396.0 367.0,400.7 383.3,405.8 399.5,406.6 415.7,409.0 431.9,412.6 448.2,415.4 464.4,417.8 480.6,423.1 496.8,424.2 513.1,426.2 529.3,424.3 545.5,424.6 561.7,431.4 578.0,432.3 594.2,436.1 610.4,434.3 626.6,437.7 642.9,439.4 659.1,438.0 675.3,441.4 691.5,444.3 707.8,446.8 724.0,443.0 740.2,443.2 756.4,447.1 772.7,445.6 788.9,445.5 805.1,447.3 821.3,451.5 837.6,451.9 853.8,455.0 870.0,453.0" fill="none" stroke="#4C78A8" stroke-width="3"/>
+<line x1="90" x2="118" y1="75" y2="75" stroke="#4C78A8" stroke-width="3"/>
+<text x="126" y="80" font-family="Arial" font-size="13" fill="#222">Train loss</text>
+<polyline points="75.0,290.3 91.2,295.1 107.4,293.5 123.7,292.7 139.9,296.7 156.1,290.1 172.3,278.9 188.6,283.4 204.8,273.9 221.0,280.8 237.2,267.6 253.5,261.2 269.7,271.0 285.9,260.5 302.1,246.8 318.4,227.5 334.6,232.9 350.8,231.4 367.0,234.0 383.3,220.7 399.5,211.2 415.7,201.5 431.9,199.4 448.2,195.9 464.4,179.2 480.6,174.6 496.8,172.1 513.1,182.4 529.3,170.2 545.5,175.8 561.7,153.5 578.0,158.0 594.2,142.3 610.4,138.5 626.6,136.5 642.9,126.5 659.1,120.6 675.3,125.0 691.5,106.6 707.8,99.6 724.0,126.9 740.2,129.1 756.4,90.1 772.7,106.5 788.9,93.2 805.1,85.3 821.3,57.5 837.6,79.9 853.8,55.0 870.0,79.2" fill="none" stroke="#E45756" stroke-width="3"/>
+<line x1="90" x2="118" y1="99" y2="99" stroke="#E45756" stroke-width="3"/>
+<text x="126" y="104" font-family="Arial" font-size="13" fill="#222">Dev loss</text>
+</svg>

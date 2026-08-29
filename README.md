@@ -1,6 +1,68 @@
 # Emo Benchmark
 
-Benchmarking vision-language model embeddings for multimodal emotion recognition.
+A lightweight benchmark for multimodal emotion recognition with frozen vision-language model embeddings. The current experiments use MELD video clips and utterances, extract representations from `Qwen/Qwen2.5-VL-3B-Instruct`, and train a small MLP classifier for seven-way emotion recognition.
+
+The main idea is intentionally simple:
+
+```text
+video clip + utterance
+  -> frozen VLM embedding extractor
+  -> pooled 2048-d representation
+  -> lightweight MLP classifier
+  -> accuracy, macro F1, weighted F1, confusion matrix
+```
+
+## Current Result
+
+The best current run uses shared video-text hidden states from Qwen2.5-VL-3B-Instruct. Qwen is not fine-tuned and `model.generate()` is not used; embeddings are extracted before the language-model head and then classified with an MLP.
+
+| Representation | Dev Accuracy | Dev Macro F1 | Test Accuracy | Test Macro F1 | Notes |
+|---|---:|---:|---:|---:|---|
+| Video-only Qwen features | 0.3158 | 0.2204 | - | - | Visual features from `get_video_features()` |
+| Shared video + utterance Qwen states | 0.6107 | 0.4872 | 0.5883 | 0.4336 | Final shared hidden state with emotion-task prompt |
+
+The jump from video-only to shared video-text embeddings shows that MELD emotion recognition depends strongly on utterance semantics as well as visual cues. The model performs best on higher-support classes such as neutral, joy, surprise, and anger, while rare classes such as disgust and fear remain more difficult.
+
+Detailed metrics and figures are available in [results/qwen2_5_vl_3b_shared](results/qwen2_5_vl_3b_shared/README.md).
+
+## Architecture
+
+![Qwen MELD benchmark architecture](assets/qwen_meld_architecture.svg)
+
+![Test confusion matrix](results/qwen2_5_vl_3b_shared/figures/test_confusion_matrix.svg)
+
+## Dataset Example
+
+The repository does not redistribute MELD videos or labels. After downloading MELD.Raw, each sample is indexed like this:
+
+| Field | Example |
+|---|---|
+| `sample_id` | `train_dia0_utt4` |
+| `video_file` | `dia0_utt4.mp4` |
+| `utterance` | corresponding MELD utterance text |
+| `emotion` | one of `anger`, `disgust`, `fear`, `joy`, `neutral`, `sadness`, `surprise` |
+
+For shared embedding extraction, each MELD row is converted to a Qwen message containing the video path and the utterance text:
+
+```python
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "video", "video": video_path, "fps": 6, "max_frames": 64},
+            {
+                "type": "text",
+                "text": (
+                    "Task: infer the speaker's emotion from the video and utterance as exactly one of:\n"
+                    "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
+                    f"Utterance: {utterance}\n"
+                    "Focus on facial expression, body cues, scene context, and wording."
+                ),
+            },
+        ],
+    }
+]
+```
 
 ## Dataset layout
 
@@ -19,7 +81,7 @@ emo-benchmark/
       output_repeated_splits_test/
 ```
 
-## Planned pipeline
+## Benchmark Pipeline
 
 ```text
 MELD video clips
@@ -30,7 +92,7 @@ MELD video clips
   -> evaluate accuracy, macro F1, weighted F1, and confusion matrix
 ```
 
-Generated embeddings and results are also ignored by Git:
+Generated embeddings and intermediate runtime outputs are ignored by Git:
 
 ```text
 embeddings/
@@ -152,9 +214,10 @@ After extracting embeddings for train and dev splits, train the lightweight clas
 
 ```bash
 python scripts/train_mlp.py \
-  --train-pt embeddings/qwen2_5_vl_3b/meld_train.pt \
-  --dev-pt embeddings/qwen2_5_vl_3b/meld_dev.pt \
-  --output-dir outputs/qwen2_5_vl_3b \
+  --train-pt embeddings/qwen2_5_vl_3b_shared/meld_train.pt \
+  --dev-pt embeddings/qwen2_5_vl_3b_shared/meld_dev.pt \
+  --test-pt embeddings/qwen2_5_vl_3b_shared/meld_test.pt \
+  --output-dir outputs/qwen2_5_vl_3b_shared \
   --hidden-dim 512 \
   --epochs 50
 ```
