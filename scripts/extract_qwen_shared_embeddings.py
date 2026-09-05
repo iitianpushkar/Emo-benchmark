@@ -180,7 +180,12 @@ def make_message(
 
 
 def fix_video_kwargs(video_kwargs: dict[str, Any]) -> dict[str, Any]:
-    fixed = dict(video_kwargs)
+    fixed = {}
+    for key, value in video_kwargs.items():
+        if value == []:
+            continue
+        fixed[key] = value
+
     # Compatibility fix for qwen-vl-utils / transformers combinations.
     if "fps" in fixed and isinstance(fixed["fps"], list) and len(fixed["fps"]) == 1:
         fixed["fps"] = fixed["fps"][0]
@@ -328,14 +333,18 @@ def extract_shared_embedding(
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
     video_kwargs = fix_video_kwargs(video_kwargs)
 
-    inputs = processor(
-        text=[text],
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt",
-        **video_kwargs,
-    ).to(model.device)
+    processor_inputs: dict[str, Any] = {
+        "text": [text],
+        "padding": True,
+        "return_tensors": "pt",
+    }
+    if image_inputs:
+        processor_inputs["images"] = image_inputs
+    if video_inputs:
+        processor_inputs["videos"] = video_inputs
+    processor_inputs.update(video_kwargs)
+
+    inputs = processor(**processor_inputs).to(model.device)
 
     try:
         with torch.inference_mode():
@@ -343,7 +352,7 @@ def extract_shared_embedding(
 
         embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
     finally:
-        del messages, text, image_inputs, video_inputs, video_kwargs, inputs
+        del messages, text, image_inputs, video_inputs, video_kwargs, processor_inputs, inputs
         if "hidden" in locals():
             del hidden
         cleanup_memory()
