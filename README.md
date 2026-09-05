@@ -203,13 +203,13 @@ python scripts/fuse_modality_embeddings.py \
   --alpha 0.5
 ```
 
-This computes:
+This aligns video/text rows by `sample_id`, drops non-finite rows by default, and computes:
 
 ```text
 fused = alpha * standardized_video + (1 - alpha) * standardized_text
 ```
 
-To run the full sweep:
+To run the full sweep with the already-trained shared video+text MLP checkpoint:
 
 ```bash
 python scripts/run_alpha_sweep.py \
@@ -217,8 +217,10 @@ python scripts/run_alpha_sweep.py \
   --text-dir embeddings/qwen2_5_vl_3b_lm_text_only \
   --fused-root embeddings/qwen2_5_vl_3b_alpha \
   --output-root outputs/qwen2_5_vl_3b_alpha \
-  --epochs 50
+  --checkpoint outputs/qwen2_5_vl_3b_shared/best_mlp.pt
 ```
+
+This does not train a new classifier per alpha. It creates each fused embedding set, then evaluates the fixed shared-space MLP with `evaluate_mlp.py`.
 
 Summarize the sweep:
 

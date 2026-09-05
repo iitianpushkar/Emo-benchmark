@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run alpha-weighted modality fusion and MLP training across many alpha values."""
+"""Run alpha-weighted modality fusion and evaluate one fixed MLP checkpoint."""
 
 from __future__ import annotations
 
@@ -13,19 +13,14 @@ DEFAULT_ALPHAS = "0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run alpha sweep for video/text LM-space embedding fusion.")
+    parser = argparse.ArgumentParser(description="Run alpha sweep with one fixed shared-space MLP checkpoint.")
     parser.add_argument("--video-dir", type=Path, required=True, help="Directory containing video_only meld_*.pt files.")
     parser.add_argument("--text-dir", type=Path, required=True, help="Directory containing text_only meld_*.pt files.")
     parser.add_argument("--fused-root", type=Path, required=True, help="Root directory for fused alpha embeddings.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Root directory for trained alpha MLP outputs.")
+    parser.add_argument("--output-root", type=Path, required=True, help="Root directory for alpha evaluation outputs.")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Shared video+text MLP checkpoint to reuse.")
     parser.add_argument("--alphas", default=DEFAULT_ALPHAS, help="Comma-separated alpha/video weights.")
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--dropout", type=float, default=0.3)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--no-normalize", action="store_true", help="Pass through to fuse_modality_embeddings.py.")
     parser.add_argument("--no-test", action="store_true", help="Do not require or train/evaluate on test embeddings.")
@@ -65,13 +60,14 @@ def main() -> None:
     required = [video_train, video_dev, text_train, text_dev]
     if not args.no_test:
         required.extend([video_test, text_test])
+    required.append(args.checkpoint)
     missing = [path for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing required embedding files: {[str(path) for path in missing]}")
 
     script_dir = Path(__file__).resolve().parent
     fuse_script = script_dir / "fuse_modality_embeddings.py"
-    train_script = script_dir / "train_mlp.py"
+    evaluate_script = script_dir / "evaluate_mlp.py"
 
     for alpha in alphas:
         run_name = alpha_dir_name(alpha)
@@ -100,35 +96,42 @@ def main() -> None:
             fuse_cmd.append("--no-normalize")
         run_command(fuse_cmd)
 
-        train_cmd = [
+        dev_eval_cmd = [
             sys.executable,
-            str(train_script),
-            "--train-pt",
-            str(fused_dir / "meld_train.pt"),
-            "--dev-pt",
+            str(evaluate_script),
+            "--checkpoint",
+            str(args.checkpoint),
+            "--embeddings-pt",
             str(fused_dir / "meld_dev.pt"),
             "--output-dir",
             str(output_dir),
-            "--hidden-dim",
-            str(args.hidden_dim),
-            "--dropout",
-            str(args.dropout),
-            "--epochs",
-            str(args.epochs),
+            "--split-name",
+            "dev",
             "--batch-size",
             str(args.batch_size),
-            "--learning-rate",
-            str(args.learning_rate),
-            "--weight-decay",
-            str(args.weight_decay),
-            "--seed",
-            str(args.seed),
             "--device",
             args.device,
         ]
+        run_command(dev_eval_cmd)
+
         if not args.no_test:
-            train_cmd.extend(["--test-pt", str(fused_dir / "meld_test.pt")])
-        run_command(train_cmd)
+            test_eval_cmd = [
+                sys.executable,
+                str(evaluate_script),
+                "--checkpoint",
+                str(args.checkpoint),
+                "--embeddings-pt",
+                str(fused_dir / "meld_test.pt"),
+                "--output-dir",
+                str(output_dir),
+                "--split-name",
+                "test",
+                "--batch-size",
+                str(args.batch_size),
+                "--device",
+                args.device,
+            ]
+            run_command(test_eval_cmd)
 
 
 if __name__ == "__main__":

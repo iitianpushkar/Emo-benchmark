@@ -31,6 +31,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fuse raw embeddings instead of standardizing each modality with train-set statistics.",
     )
+    parser.add_argument(
+        "--strict-sample-ids",
+        action="store_true",
+        help="Require video/text files to contain exactly the same sample_ids instead of using their intersection.",
+    )
+    parser.add_argument(
+        "--keep-non-finite",
+        action="store_true",
+        help="Keep rows with NaN/Inf values instead of dropping them before fusion.",
+    )
     return parser.parse_args()
 
 
@@ -59,6 +69,8 @@ def align_text_to_video(
     text_payload: dict[str, Any],
     video_path: Path,
     text_path: Path,
+    strict_sample_ids: bool,
+    drop_non_finite: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str], list[dict[str, Any]]]:
     video_index = payload_by_sample_id(video_payload, video_path)
     text_index = payload_by_sample_id(text_payload, text_path)
@@ -66,17 +78,35 @@ def align_text_to_video(
     video_ids = [str(sample_id) for sample_id in video_payload["sample_ids"]]
     missing_from_text = [sample_id for sample_id in video_ids if sample_id not in text_index]
     extra_text = [sample_id for sample_id in text_index if sample_id not in video_index]
-    if missing_from_text or extra_text:
+    if strict_sample_ids and (missing_from_text or extra_text):
         raise ValueError(
             f"Sample id mismatch between {video_path} and {text_path}: "
             f"{len(missing_from_text)} missing from text, {len(extra_text)} extra in text"
         )
 
-    text_order = [text_index[sample_id] for sample_id in video_ids]
-    video_x = video_payload["embeddings"].float()
-    text_x = text_payload["embeddings"][text_order].float()
-    labels = video_payload["labels"].long()
-    text_labels = text_payload["labels"][text_order].long()
+    aligned_video_indices = []
+    aligned_text_indices = []
+    aligned_ids = []
+    for sample_id in video_ids:
+        if sample_id not in text_index:
+            continue
+        video_pos = video_index[sample_id]
+        text_pos = text_index[sample_id]
+        video_row = video_payload["embeddings"][video_pos].float()
+        text_row = text_payload["embeddings"][text_pos].float()
+        if drop_non_finite and (not torch.isfinite(video_row).all() or not torch.isfinite(text_row).all()):
+            continue
+        aligned_video_indices.append(video_pos)
+        aligned_text_indices.append(text_pos)
+        aligned_ids.append(sample_id)
+
+    if not aligned_ids:
+        raise ValueError(f"No aligned finite sample_ids between {video_path} and {text_path}")
+
+    video_x = video_payload["embeddings"][aligned_video_indices].float()
+    text_x = text_payload["embeddings"][aligned_text_indices].float()
+    labels = video_payload["labels"][aligned_video_indices].long()
+    text_labels = text_payload["labels"][aligned_text_indices].long()
 
     if video_x.ndim != 2 or text_x.ndim != 2:
         raise ValueError("Expected video and text embeddings to be 2D tensors")
@@ -86,16 +116,20 @@ def align_text_to_video(
         raise ValueError(f"Label mismatch after sample_id alignment between {video_path} and {text_path}")
 
     video_meta = video_payload.get("metadata", [{} for _ in video_ids])
-    text_meta = text_payload.get("metadata", [{} for _ in video_ids])
+    text_meta = text_payload.get("metadata", [{} for _ in text_index])
     metadata = []
-    for i, sample_id in enumerate(video_ids):
-        row = dict(video_meta[i] if i < len(video_meta) and isinstance(video_meta[i], dict) else {})
+    for video_pos, text_pos, sample_id in zip(aligned_video_indices, aligned_text_indices, aligned_ids):
+        row = dict(video_meta[video_pos] if video_pos < len(video_meta) and isinstance(video_meta[video_pos], dict) else {})
         row["sample_id"] = sample_id
         row["fusion_source"] = "alpha_video_plus_text"
-        row["text_metadata"] = text_meta[text_order[i]] if text_order[i] < len(text_meta) else {}
+        row["text_metadata"] = text_meta[text_pos] if text_pos < len(text_meta) else {}
         metadata.append(row)
 
-    return video_x, text_x, labels, video_ids, metadata
+    print(
+        f"Aligned {video_path.name} + {text_path.name}: "
+        f"{len(aligned_ids)} kept, {len(missing_from_text)} missing text, {len(extra_text)} extra text"
+    )
+    return video_x, text_x, labels, aligned_ids, metadata
 
 
 def fit_standardizer(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -154,6 +188,8 @@ def main() -> None:
             text_payload,
             video_path,
             text_path,
+            strict_sample_ids=args.strict_sample_ids,
+            drop_non_finite=not args.keep_non_finite,
         )
         label_names = video_payload.get("label_names", text_payload.get("label_names", []))
         aligned[split] = (video_x, text_x, labels, sample_ids, metadata, {"label_names": label_names})
@@ -176,6 +212,8 @@ def main() -> None:
             "alpha_video": args.alpha,
             "beta_text": 1.0 - args.alpha,
             "normalized_before_fusion": not args.no_normalize,
+            "strict_sample_ids": args.strict_sample_ids,
+            "drop_non_finite": not args.keep_non_finite,
             "video_path": str(pairs[split][0]),
             "text_path": str(pairs[split][1]),
         }

@@ -26,10 +26,22 @@ def alpha_from_dir(path: Path) -> float:
 
 def load_metrics(path: Path) -> dict[str, Any]:
     metrics_path = path / "metrics.json"
-    if not metrics_path.exists():
-        raise FileNotFoundError(metrics_path)
-    with metrics_path.open(encoding="utf-8") as f:
-        return json.load(f)
+    if metrics_path.exists():
+        with metrics_path.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    dev_metrics_path = path / "dev_metrics.json"
+    test_metrics_path = path / "test_metrics.json"
+    if not dev_metrics_path.exists():
+        raise FileNotFoundError(f"Could not find {metrics_path} or {dev_metrics_path}")
+
+    metrics = {}
+    with dev_metrics_path.open(encoding="utf-8") as f:
+        metrics["best_dev"] = json.load(f)
+    if test_metrics_path.exists():
+        with test_metrics_path.open(encoding="utf-8") as f:
+            metrics["test"] = json.load(f)
+    return metrics
 
 
 def split_metric(metrics: dict[str, Any], split: str, metric: str) -> float | None:
