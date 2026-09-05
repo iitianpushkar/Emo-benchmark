@@ -1,0 +1,7 @@
+[
+  {
+    "sample_id": "train_dia125_utt3",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia125_utt3.mp4",
+    "error": "RuntimeError('Error reading /kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia125_utt3.mp4...')"
+  }
+]

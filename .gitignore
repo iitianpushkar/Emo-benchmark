@@ -2,12 +2,6 @@
 dataset/*
 !dataset/.gitkeep
 
-embeddings/*
-!embeddings/.gitkeep
-
-outputs/*
-!outputs/.gitkeep
-
 
 # Python environment
 .venv/
