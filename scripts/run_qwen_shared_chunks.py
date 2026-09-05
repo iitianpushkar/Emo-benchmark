@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-size", type=int, default=224, help="Square resize size for video frames.")
     parser.add_argument("--pooling", choices=["last", "mean", "max"], default="last", help="Pooling used by extractor.")
     parser.add_argument("--prompt-style", choices=["emotion_task", "utterance_only"], default="emotion_task")
+    parser.add_argument(
+        "--modality-mode",
+        choices=["video_text", "video_only", "text_only"],
+        default="video_text",
+        help="Input condition forwarded to extract_qwen_shared_embeddings.py.",
+    )
     parser.add_argument("--save-dtype", choices=["float16", "float32"], default="float32")
     parser.add_argument("--gc-every", type=int, default=5)
     parser.add_argument("--batch-save-every", type=int, default=25)
@@ -261,6 +267,8 @@ def main() -> None:
             args.pooling,
             "--prompt-style",
             args.prompt_style,
+            "--modality-mode",
+            args.modality_mode,
             "--save-dtype",
             args.save_dtype,
             "--gc-every",

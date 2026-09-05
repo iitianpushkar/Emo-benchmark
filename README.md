@@ -165,6 +165,71 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
 
+## Alpha-weighted modality fusion
+
+For modality overshadowing, extract video-only and text-only embeddings from the same Qwen LM hidden-state space:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_lm_video_only/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_only
+
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_lm_text_only/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode text_only
+```
+
+Repeat for `dev` and `test`. Then create one fused embedding set:
+
+```bash
+python scripts/fuse_modality_embeddings.py \
+  --video-train-pt embeddings/qwen2_5_vl_3b_lm_video_only/meld_train.pt \
+  --text-train-pt embeddings/qwen2_5_vl_3b_lm_text_only/meld_train.pt \
+  --video-dev-pt embeddings/qwen2_5_vl_3b_lm_video_only/meld_dev.pt \
+  --text-dev-pt embeddings/qwen2_5_vl_3b_lm_text_only/meld_dev.pt \
+  --video-test-pt embeddings/qwen2_5_vl_3b_lm_video_only/meld_test.pt \
+  --text-test-pt embeddings/qwen2_5_vl_3b_lm_text_only/meld_test.pt \
+  --output-dir embeddings/qwen2_5_vl_3b_alpha/alpha_0_50 \
+  --alpha 0.5
+```
+
+This computes:
+
+```text
+fused = alpha * standardized_video + (1 - alpha) * standardized_text
+```
+
+To run the full sweep:
+
+```bash
+python scripts/run_alpha_sweep.py \
+  --video-dir embeddings/qwen2_5_vl_3b_lm_video_only \
+  --text-dir embeddings/qwen2_5_vl_3b_lm_text_only \
+  --fused-root embeddings/qwen2_5_vl_3b_alpha \
+  --output-root outputs/qwen2_5_vl_3b_alpha \
+  --epochs 50
+```
+
+Summarize the sweep:
+
+```bash
+python scripts/summarize_alpha_sweep.py \
+  --output-root outputs/qwen2_5_vl_3b_alpha \
+  --output-csv outputs/qwen2_5_vl_3b_alpha/summary.csv
+```
+
+Here `alpha` is the video weight and `1 - alpha` is the text weight. If the best macro F1 occurs near `alpha=0.0`, the classifier is text-dominant. If it occurs near `alpha=1.0`, it is video-dominant. A best value near `alpha=0.5` suggests balanced fusion.
+
 If Kaggle stops a long extraction run, rerun the same command with `--resume`. Existing `sample_ids` in the output file are skipped, so only missing clips are extracted:
 
 ```bash

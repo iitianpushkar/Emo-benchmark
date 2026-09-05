@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Extract shared Qwen2.5-VL video+utterance embeddings for MELD.
 
-This script passes both the MELD video clip and its corresponding utterance
-through Qwen2.5-VL, then pools hidden states from the multimodal transformer.
+This script passes MELD inputs through Qwen2.5-VL, then pools hidden states
+from the multimodal transformer.
 It does not call model.generate() and does not train Qwen.
 
 Compared with extract_qwen_embeddings.py:
   - extract_qwen_embeddings.py saves video-only visual features from get_video_features(...)
   - this script saves shared/contextual video+text hidden-state embeddings
+  - this script can also extract video-only or text-only LM-space embeddings
 """
 
 from __future__ import annotations
@@ -91,6 +92,15 @@ def parse_args() -> argparse.Namespace:
         help="Do not append Qwen's assistant-generation marker before the forward pass.",
     )
     parser.add_argument(
+        "--modality-mode",
+        choices=["video_text", "video_only", "text_only"],
+        default="video_text",
+        help=(
+            "Input condition for LM-space extraction. video_text uses the matched clip and utterance; "
+            "video_only removes the utterance; text_only removes the video."
+        ),
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True to from_pretrained if needed by a model variant.",
@@ -98,7 +108,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def make_prompt(utterance: str, prompt_style: str) -> str:
+def make_prompt(utterance: str | None, prompt_style: str, modality_mode: str) -> str:
+    if modality_mode == "video_only":
+        if prompt_style == "utterance_only":
+            return "Infer the speaker's emotion from the video."
+        if prompt_style == "emotion_task":
+            return (
+                "Task: infer the speaker's emotion from the video as exactly one of:\n"
+                "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
+                "Focus on facial expression, body cues, and scene context."
+            )
+        raise ValueError(f"Unknown prompt style: {prompt_style}")
+
+    utterance = "" if utterance is None else utterance
+    if modality_mode == "text_only":
+        if prompt_style == "utterance_only":
+            return f"Utterance: {utterance}"
+        if prompt_style == "emotion_task":
+            return (
+                "Task: infer the speaker's emotion from the utterance as exactly one of:\n"
+                "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
+                f"Utterance: {utterance}\n"
+                "Focus on wording and conversational meaning."
+            )
+        raise ValueError(f"Unknown prompt style: {prompt_style}")
+
     if prompt_style == "utterance_only":
         return f"Utterance: {utterance}"
     if prompt_style == "emotion_task":
@@ -112,29 +146,35 @@ def make_prompt(utterance: str, prompt_style: str) -> str:
 
 
 def make_message(
-    video_path: str,
-    utterance: str,
+    video_path: str | None,
+    utterance: str | None,
     fps: float,
     min_frames: int,
     max_frames: int,
     frame_size: int,
     prompt_style: str,
+    modality_mode: str,
 ) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = []
+    if modality_mode in {"video_text", "video_only"}:
+        if video_path is None:
+            raise ValueError("video_path is required for video_text and video_only modes")
+        content.append(
+            {
+                "type": "video",
+                "video": video_path,
+                "fps": fps,
+                "min_frames": min_frames,
+                "max_frames": max_frames,
+                "resized_height": frame_size,
+                "resized_width": frame_size,
+            }
+        )
+    content.append({"type": "text", "text": make_prompt(utterance, prompt_style, modality_mode)})
     return [
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "video",
-                    "video": video_path,
-                    "fps": fps,
-                    "min_frames": min_frames,
-                    "max_frames": max_frames,
-                    "resized_height": frame_size,
-                    "resized_width": frame_size,
-                },
-                {"type": "text", "text": make_prompt(utterance, prompt_style)},
-            ],
+            "content": content,
         }
     ]
 
@@ -271,8 +311,8 @@ def forward_multimodal_hidden_state(
 def extract_shared_embedding(
     model: Qwen2_5_VLForConditionalGeneration,
     processor: AutoProcessor,
-    video_path: str,
-    utterance: str,
+    video_path: str | None,
+    utterance: str | None,
     fps: float,
     min_frames: int,
     max_frames: int,
@@ -281,8 +321,9 @@ def extract_shared_embedding(
     pooling: str,
     prompt_style: str,
     add_generation_prompt: bool,
+    modality_mode: str,
 ) -> torch.Tensor:
-    messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style)
+    messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
     video_kwargs = fix_video_kwargs(video_kwargs)
@@ -324,7 +365,10 @@ def main() -> None:
     os.environ["VIDEO_MAX_PIXELS"] = str(video_max_pixels)
 
     df = pd.read_csv(args.index_csv)
-    if "video_exists" in df.columns:
+    include_video = args.modality_mode in {"video_text", "video_only"}
+    include_utterance = args.modality_mode in {"video_text", "text_only"}
+
+    if include_video and "video_exists" in df.columns:
         df = df[df["video_exists"].astype(bool)].copy()
     if args.start:
         df = df.iloc[args.start:].copy()
@@ -339,7 +383,7 @@ def main() -> None:
 
     print(f"Rows to process: {len(df)}")
     print(f"Model: {args.model_id}")
-    print("Embedding type: shared video+utterance hidden states")
+    print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
     print(f"Layer: {args.layer}; pooling: {args.pooling}")
     print(f"Prompt style: {args.prompt_style}; add_generation_prompt={not args.no_generation_prompt}")
     print(f"Video sampling: fps={args.fps}, min_frames={args.min_frames}, max_frames={args.max_frames}, frame_size={args.frame_size}")
@@ -389,15 +433,15 @@ def main() -> None:
             continue
 
         try:
-            if not Path(video_path).exists():
+            if include_video and not Path(video_path).exists():
                 raise FileNotFoundError(video_path)
-            if not args.skip_decord_precheck:
+            if include_video and not args.skip_decord_precheck:
                 precheck_video_with_decord(video_path)
             embedding = extract_shared_embedding(
                 model=model,
                 processor=processor,
-                video_path=video_path,
-                utterance=utterance,
+                video_path=video_path if include_video else None,
+                utterance=utterance if include_utterance else None,
                 fps=args.fps,
                 min_frames=args.min_frames,
                 max_frames=args.max_frames,
@@ -406,11 +450,16 @@ def main() -> None:
                 pooling=args.pooling,
                 prompt_style=args.prompt_style,
                 add_generation_prompt=not args.no_generation_prompt,
+                modality_mode=args.modality_mode,
             )
             embeddings.append(embedding.to(dtype=output_dtype))
             labels.append(int(row["emotion_id"]))
             sample_ids.append(sample_id)
-            metadata.append(row.to_dict())
+            row_metadata = row.to_dict()
+            row_metadata["modality_mode"] = args.modality_mode
+            row_metadata["include_video"] = include_video
+            row_metadata["include_utterance"] = include_utterance
+            metadata.append(row_metadata)
             done_ids.add(sample_id)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
@@ -433,7 +482,13 @@ def main() -> None:
                 "sample_ids": sample_ids,
                 "metadata": metadata,
                 "errors": errors,
-                "config": vars(args) | {"video_max_pixels": video_max_pixels, "embedding_type": "shared_video_text"},
+                "config": vars(args)
+                | {
+                    "video_max_pixels": video_max_pixels,
+                    "embedding_type": f"shared_lm_{args.modality_mode}",
+                    "include_video": include_video,
+                    "include_utterance": include_utterance,
+                },
             }
             save_payload(args.output_pt, payload)
 
@@ -450,7 +505,13 @@ def main() -> None:
         "sample_ids": sample_ids,
         "metadata": metadata,
         "errors": errors,
-        "config": vars(args) | {"video_max_pixels": video_max_pixels, "embedding_type": "shared_video_text"},
+        "config": vars(args)
+        | {
+            "video_max_pixels": video_max_pixels,
+            "embedding_type": f"shared_lm_{args.modality_mode}",
+            "include_video": include_video,
+            "include_utterance": include_utterance,
+        },
     }
     save_payload(args.output_pt, payload)
 
