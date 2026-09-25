@@ -275,6 +275,71 @@ python scripts/merge_embedding_chunks.py \
   --pattern "train_*.pt"
 ```
 
+## Extract InternVL3 video+utterance embeddings
+
+InternVL3 uses its native video processor and its final shared language hidden
+state before the LM head. Frames are decoded with Decord at the requested FPS,
+capped at `--max-frames`, and processed at the checkpoint's native resolution.
+No text is generated and the InternVL3 weights remain frozen.
+
+Run a small smoke test first:
+
+```bash
+python scripts/extract_internvl3_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/internvl3_2b/meld_train_100.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --limit 100 \
+  --pooling last \
+  --save-dtype float32
+```
+
+For a full Kaggle run, use resumable chunks. Each chunk runs in a fresh process,
+which releases model and decoder memory before the next chunk starts:
+
+```bash
+python scripts/run_internvl3_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/internvl3_2b_shared_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --skip-existing-complete
+```
+
+Repeat the command for dev and test with their corresponding index CSV,
+chunk directory, and prefix. Merge each completed split:
+
+```bash
+python scripts/merge_embedding_chunks.py \
+  --chunks-dir embeddings/internvl3_2b_shared_chunks/train \
+  --output-pt embeddings/internvl3_2b_shared/meld_train.pt \
+  --pattern 'train_*.pt'
+```
+
+The merged files use the same payload format as the Qwen embeddings, so the
+existing MLP training and evaluation scripts work without model-specific
+changes. Do not seed an InternVL3 run from a Qwen `.pt` file because their
+representations and dimensions differ.
+
+Train the InternVL3 probe after merging train, dev, and test:
+
+```bash
+python scripts/train_mlp.py \
+  --train-pt embeddings/internvl3_2b_shared/meld_train.pt \
+  --dev-pt embeddings/internvl3_2b_shared/meld_dev.pt \
+  --test-pt embeddings/internvl3_2b_shared/meld_test.pt \
+  --output-dir outputs/internvl3_2b_shared \
+  --hidden-dim 512 \
+  --epochs 50
+```
+
 ## Train MLP classifier
 
 After extracting embeddings for train and dev splits, train the lightweight classifier:
