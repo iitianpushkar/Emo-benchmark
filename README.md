@@ -340,6 +340,86 @@ python scripts/train_mlp.py \
   --epochs 50
 ```
 
+## Extract SmolVLM2 video+utterance embeddings
+
+`HuggingFaceTB/SmolVLM2-2.2B-Instruct` is evaluated at the benchmark's default
+6 FPS and at most 64 frames. Spatial preprocessing remains checkpoint-native:
+384 x 384 frames and 81 visual tokens per frame. The extractor intentionally
+has no frame-size option, preventing an accidental spatial-resolution shift.
+Decord only decodes the uniformly selected frames; the official processor
+performs resizing, normalization, padding, visual token construction, and
+text-video fusion. SmolVLM2's official temporal default is 1 FPS, which remains
+available with `--fps 1` and should be reported as a separate configuration.
+
+Run a 100-sample smoke test before starting all three splits:
+
+```bash
+python scripts/extract_smolvlm2_embeddings.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --output-pt embeddings/smolvlm2_2_2b_shared/meld_train_100.pt \
+  --limit 100 \
+  --fps 6 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32
+```
+
+Use fresh-process chunks for the complete train split:
+
+```bash
+python scripts/run_smolvlm2_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/smolvlm2_2_2b_shared_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --skip-existing-complete
+```
+
+Repeat for dev and test by changing the index, chunk directory, and prefix.
+Merge each split using the existing model-agnostic merger:
+
+```bash
+python scripts/merge_embedding_chunks.py \
+  --chunks-dir embeddings/smolvlm2_2_2b_shared_chunks/train \
+  --output-pt embeddings/smolvlm2_2_2b_shared/meld_train.pt \
+  --pattern 'train_*.pt'
+```
+
+Train the same MLP probe after merging all splits:
+
+```bash
+python scripts/train_mlp.py \
+  --train-pt embeddings/smolvlm2_2_2b_shared/meld_train.pt \
+  --dev-pt embeddings/smolvlm2_2_2b_shared/meld_dev.pt \
+  --test-pt embeddings/smolvlm2_2_2b_shared/meld_test.pt \
+  --output-dir outputs/smolvlm2_2_2b_shared \
+  --hidden-dim 512 \
+  --epochs 50
+```
+
+The scripts default to the project's 6 FPS / 64-frame benchmark setting. Pass
+`--fps 1` for a separate run using SmolVLM2's official temporal default. Never
+resume, merge, or compare chunks as one run when their FPS settings differ.
+
+A ready-to-run Kaggle workflow is provided in
+`notebooks/smolvlm2_meld_benchmark.ipynb`. Its configuration cell controls FPS,
+chunk size, and paths for all three splits, and automatically places different
+FPS runs in separate directories.
+
+Benchmark validity checks:
+
+- Use identical extraction settings for train, dev, and test.
+- Keep separate chunk directories for every model and sampling configuration.
+- Keep the VLM frozen and select MLP checkpoints using dev data only.
+- Do not use test metrics for hyperparameter selection.
+- Report failed/corrupt clips and the final successful sample count per split.
+- Compare native-preprocessing runs separately from matched-compute ablations.
+
 ## Train MLP classifier
 
 After extracting embeddings for train and dev splits, train the lightweight classifier:
