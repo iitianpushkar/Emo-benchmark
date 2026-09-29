@@ -150,6 +150,7 @@ def main() -> None:
 
         cmd = [
             sys.executable,
+            "-u",
             str(extractor),
             "--index-csv",
             str(args.index_csv),

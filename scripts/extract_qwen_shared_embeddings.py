@@ -30,6 +30,7 @@ from tqdm.auto import tqdm
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
+DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +99,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Input condition for LM-space extraction. video_text uses the matched clip and utterance; "
             "video_only removes the utterance; text_only removes the video."
+        ),
+    )
+    parser.add_argument(
+        "--visual-token-ablation",
+        choices=["none", "zero"],
+        default="none",
+        help=(
+            "Intervene on projected visual tokens immediately before they enter the language model. "
+            "'zero' preserves token count and positions but replaces every visual token value with zero."
         ),
     )
     parser.add_argument(
@@ -223,6 +233,8 @@ def load_resume_payload(
     path: Path,
     output_dtype: torch.dtype,
     retry_errors: bool,
+    modality_mode: str,
+    visual_token_ablation: str,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
         return [], [], [], [], [], set()
@@ -230,6 +242,26 @@ def load_resume_payload(
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if "embeddings" not in payload or "labels" not in payload or "sample_ids" not in payload:
         raise ValueError(f"Cannot resume from {path}; missing embeddings, labels, or sample_ids")
+
+    saved_config = payload.get("config", {})
+    saved_modality_mode = saved_config.get("modality_mode")
+    saved_ablation = saved_config.get("visual_token_ablation", "none")
+    if saved_modality_mode is not None and saved_modality_mode != modality_mode:
+        raise ValueError(
+            f"Cannot resume from {path}; modality_mode={saved_modality_mode!r}, expected {modality_mode!r}"
+        )
+    if saved_ablation != visual_token_ablation:
+        raise ValueError(
+            f"Cannot resume from {path}; visual_token_ablation={saved_ablation!r}, "
+            f"expected {visual_token_ablation!r}"
+        )
+    if visual_token_ablation == "zero":
+        saved_implementation = saved_config.get("visual_ablation_implementation")
+        if saved_implementation != DIRECT_ZERO_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; visual_ablation_implementation={saved_implementation!r}, "
+                f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+            )
 
     embeddings_tensor = payload["embeddings"].cpu().to(dtype=output_dtype)
     labels_tensor = payload["labels"].cpu().long()
@@ -280,9 +312,59 @@ def forward_multimodal_hidden_state(
     model: Qwen2_5_VLForConditionalGeneration,
     inputs: dict[str, torch.Tensor],
     layer: int,
+    visual_token_ablation: str,
 ) -> torch.Tensor:
     """Return one shared transformer hidden-state tensor before Qwen's LM head."""
     base_model = getattr(model, "model", None)
+    if visual_token_ablation == "zero":
+        if base_model is None:
+            raise AttributeError("Zero-token ablation requires the Qwen base model")
+
+        input_ids = inputs.get("input_ids")
+        if input_ids is None:
+            raise ValueError("Zero-token ablation requires input_ids to locate video placeholders")
+
+        video_token_id = getattr(base_model.config, "video_token_id", None)
+        if video_token_id is None:
+            raise AttributeError("Qwen config does not expose video_token_id")
+
+        video_mask = input_ids.eq(video_token_id)
+        video_token_count = int(video_mask.sum().item())
+        if video_token_count == 0:
+            raise ValueError("No video placeholder tokens were found in input_ids")
+
+        video_grid_thw = inputs.get("video_grid_thw")
+        if video_grid_thw is None:
+            raise ValueError("Zero-token ablation requires video_grid_thw for multimodal position IDs")
+        spatial_merge_size = int(base_model.config.vision_config.spatial_merge_size)
+        expected_video_tokens = int(
+            (video_grid_thw.prod(dim=-1) // (spatial_merge_size**2)).sum().item()
+        )
+        if video_token_count != expected_video_tokens:
+            raise ValueError(
+                "Video placeholder count does not match the processor grid: "
+                f"placeholders={video_token_count}, expected={expected_video_tokens}"
+            )
+
+        inputs_embeds = base_model.get_input_embeddings()(input_ids)
+        inputs_embeds = inputs_embeds.masked_fill(video_mask.unsqueeze(-1), 0.0)
+
+        # Keep input_ids and grid metadata so Qwen computes its original 3D multimodal
+        # RoPE positions, but omit pixels so the visual encoder is never called.
+        ablated_inputs = {
+            key: value
+            for key, value in inputs.items()
+            if key not in {"pixel_values_videos", "pixel_values"}
+        }
+        ablated_inputs["inputs_embeds"] = inputs_embeds
+        outputs = base_model(
+            **ablated_inputs,
+            output_hidden_states=(layer != -1),
+            use_cache=False,
+            return_dict=True,
+        )
+        return outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
+
     if base_model is not None:
         outputs = base_model(
             **inputs,
@@ -290,9 +372,7 @@ def forward_multimodal_hidden_state(
             use_cache=False,
             return_dict=True,
         )
-        if layer == -1:
-            return outputs.last_hidden_state
-        return outputs.hidden_states[layer]
+        return outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
 
     # Fallback for unusual wrappers. logits_to_keep=1 reduces LM-head memory on newer transformers.
     try:
@@ -327,7 +407,8 @@ def extract_shared_embedding(
     prompt_style: str,
     add_generation_prompt: bool,
     modality_mode: str,
-) -> torch.Tensor:
+    visual_token_ablation: str,
+) -> tuple[torch.Tensor, int]:
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
@@ -344,11 +425,23 @@ def extract_shared_embedding(
         processor_inputs["videos"] = video_inputs
     processor_inputs.update(video_kwargs)
 
-    inputs = processor(**processor_inputs).to(model.device)
+    inputs = processor(**processor_inputs)
+    if visual_token_ablation == "zero":
+        # The processor is still the source of truth for placeholder expansion and
+        # grid metadata, but its pixel tensor is unnecessary for this intervention.
+        inputs.pop("pixel_values_videos", None)
+        inputs.pop("pixel_values", None)
+    inputs = inputs.to(model.device)
+    video_token_id = getattr(model.model.config, "video_token_id", None)
+    video_token_count = (
+        int(inputs["input_ids"].eq(video_token_id).sum().item())
+        if video_token_id is not None and "input_ids" in inputs
+        else 0
+    )
 
     try:
         with torch.inference_mode():
-            hidden = forward_multimodal_hidden_state(model, inputs, layer)
+            hidden = forward_multimodal_hidden_state(model, inputs, layer, visual_token_ablation)
 
         embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
     finally:
@@ -357,7 +450,7 @@ def extract_shared_embedding(
             del hidden
         cleanup_memory()
 
-    return embedding
+    return embedding, video_token_count
 
 
 def save_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -369,6 +462,9 @@ def save_payload(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> None:
     args = parse_args()
+
+    if args.visual_token_ablation != "none" and args.modality_mode == "text_only":
+        raise ValueError("Visual-token ablation requires a modality mode that includes video")
 
     video_max_pixels = args.video_max_pixels or int(args.frame_size * args.frame_size * args.max_frames)
     os.environ["VIDEO_MAX_PIXELS"] = str(video_max_pixels)
@@ -393,6 +489,7 @@ def main() -> None:
     print(f"Rows to process: {len(df)}")
     print(f"Model: {args.model_id}")
     print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
+    print(f"Visual-token ablation: {args.visual_token_ablation}")
     print(f"Layer: {args.layer}; pooling: {args.pooling}")
     print(f"Prompt style: {args.prompt_style}; add_generation_prompt={not args.no_generation_prompt}")
     print(f"Video sampling: fps={args.fps}, min_frames={args.min_frames}, max_frames={args.max_frames}, frame_size={args.frame_size}")
@@ -421,7 +518,11 @@ def main() -> None:
 
     if args.resume:
         embeddings, labels, sample_ids, metadata, errors, done_ids = load_resume_payload(
-            args.output_pt, output_dtype=output_dtype, retry_errors=args.retry_errors
+            args.output_pt,
+            output_dtype=output_dtype,
+            retry_errors=args.retry_errors,
+            modality_mode=args.modality_mode,
+            visual_token_ablation=args.visual_token_ablation,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
         print(f"Resume skip set: {len(done_ids)} sample ids")
@@ -446,7 +547,7 @@ def main() -> None:
                 raise FileNotFoundError(video_path)
             if include_video and not args.skip_decord_precheck:
                 precheck_video_with_decord(video_path)
-            embedding = extract_shared_embedding(
+            embedding, video_token_count = extract_shared_embedding(
                 model=model,
                 processor=processor,
                 video_path=video_path if include_video else None,
@@ -460,6 +561,7 @@ def main() -> None:
                 prompt_style=args.prompt_style,
                 add_generation_prompt=not args.no_generation_prompt,
                 modality_mode=args.modality_mode,
+                visual_token_ablation=args.visual_token_ablation,
             )
             embeddings.append(embedding.to(dtype=output_dtype))
             labels.append(int(row["emotion_id"]))
@@ -468,6 +570,11 @@ def main() -> None:
             row_metadata["modality_mode"] = args.modality_mode
             row_metadata["include_video"] = include_video
             row_metadata["include_utterance"] = include_utterance
+            row_metadata["visual_token_ablation"] = args.visual_token_ablation
+            row_metadata["visual_ablation_implementation"] = (
+                DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
+            )
+            row_metadata["video_token_count"] = video_token_count
             metadata.append(row_metadata)
             done_ids.add(sample_id)
         except torch.cuda.OutOfMemoryError:
@@ -494,7 +601,13 @@ def main() -> None:
                 "config": vars(args)
                 | {
                     "video_max_pixels": video_max_pixels,
-                    "embedding_type": f"shared_lm_{args.modality_mode}",
+                    "embedding_type": (
+                        f"shared_lm_{args.modality_mode}"
+                        + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
+                    ),
+                    "visual_ablation_implementation": (
+                        DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
+                    ),
                     "include_video": include_video,
                     "include_utterance": include_utterance,
                 },
@@ -517,7 +630,13 @@ def main() -> None:
         "config": vars(args)
         | {
             "video_max_pixels": video_max_pixels,
-            "embedding_type": f"shared_lm_{args.modality_mode}",
+            "embedding_type": (
+                f"shared_lm_{args.modality_mode}"
+                + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
+            ),
+            "visual_ablation_implementation": (
+                DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
+            ),
             "include_video": include_video,
             "include_utterance": include_utterance,
         },

@@ -18,6 +18,8 @@ from typing import Any
 import pandas as pd
 import torch
 
+DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run shared Qwen embedding extraction in resumable chunks.")
@@ -45,6 +47,12 @@ def parse_args() -> argparse.Namespace:
         default="video_text",
         help="Input condition forwarded to extract_qwen_shared_embeddings.py.",
     )
+    parser.add_argument(
+        "--visual-token-ablation",
+        choices=["none", "zero"],
+        default="none",
+        help="Visual-token intervention forwarded to extract_qwen_shared_embeddings.py.",
+    )
     parser.add_argument("--save-dtype", choices=["float16", "float32"], default="float32")
     parser.add_argument("--gc-every", type=int, default=5)
     parser.add_argument("--batch-save-every", type=int, default=25)
@@ -70,12 +78,56 @@ def chunk_path(chunks_dir: Path, prefix: str, start: int, end: int) -> Path:
     return chunks_dir / f"{prefix}_{start:05d}_{end:05d}.pt"
 
 
-def existing_chunk_count(path: Path) -> int | None:
+def payload_visual_token_ablation(payload: dict[str, Any]) -> str:
+    config = payload.get("config", {})
+    if "visual_token_ablation" in config:
+        return str(config["visual_token_ablation"])
+    merged_from = config.get("merged_from", [])
+    nested_values = {
+        str(item.get("config", {}).get("visual_token_ablation", "none"))
+        for item in merged_from
+        if isinstance(item, dict)
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Seed payload mixes visual-token ablation modes: {sorted(nested_values)}")
+    return next(iter(nested_values), "none")
+
+
+def payload_visual_ablation_implementation(payload: dict[str, Any]) -> str | None:
+    config = payload.get("config", {})
+    if "visual_ablation_implementation" in config:
+        return str(config["visual_ablation_implementation"])
+    nested_values = {
+        str(item.get("config", {}).get("visual_ablation_implementation"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict) and item.get("config", {}).get("visual_ablation_implementation") is not None
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Seed payload mixes visual-ablation implementations: {sorted(nested_values)}")
+    return next(iter(nested_values), None)
+
+
+def existing_chunk_count(path: Path, expected_visual_token_ablation: str) -> int | None:
     if not path.exists():
         return None
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
+        saved_ablation = payload_visual_token_ablation(payload)
+        if saved_ablation != expected_visual_token_ablation:
+            raise ValueError(
+                f"Existing chunk {path} has visual_token_ablation={saved_ablation!r}, "
+                f"expected {expected_visual_token_ablation!r}"
+            )
+        if expected_visual_token_ablation == "zero":
+            saved_implementation = payload_visual_ablation_implementation(payload)
+            if saved_implementation != DIRECT_ZERO_IMPLEMENTATION:
+                raise ValueError(
+                    f"Existing chunk {path} has visual_ablation_implementation={saved_implementation!r}, "
+                    f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+                )
         return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
+    except ValueError:
+        raise
     except Exception:
         return None
 
@@ -95,6 +147,7 @@ def seed_chunks_from_existing_pt(
     chunk_size: int,
     start: int,
     stop: int,
+    visual_token_ablation: str,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
         return
@@ -104,6 +157,19 @@ def seed_chunks_from_existing_pt(
     missing = [key for key in required if key not in payload]
     if missing:
         raise ValueError(f"Cannot seed chunks from {seed_pt}; missing keys: {missing}")
+    saved_ablation = payload_visual_token_ablation(payload)
+    if saved_ablation != visual_token_ablation:
+        raise ValueError(
+            f"Cannot seed {visual_token_ablation!r} extraction from {seed_pt}; "
+            f"the seed contains {saved_ablation!r} embeddings"
+        )
+    if visual_token_ablation == "zero":
+        saved_implementation = payload_visual_ablation_implementation(payload)
+        if saved_implementation != DIRECT_ZERO_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot seed from {seed_pt}; visual_ablation_implementation={saved_implementation!r}, "
+                f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+            )
 
     sample_ids = [str(item) for item in payload.get("sample_ids", [])]
     embeddings = payload["embeddings"].cpu()
@@ -181,6 +247,10 @@ def seed_chunks_from_existing_pt(
                 "chunk_start": chunk_start,
                 "chunk_end": chunk_end,
                 "embedding_type": payload.get("config", {}).get("embedding_type", "shared_video_text"),
+                "visual_token_ablation": visual_token_ablation,
+                "visual_ablation_implementation": (
+                    DIRECT_ZERO_IMPLEMENTATION if visual_token_ablation == "zero" else "none"
+                ),
             },
         }
         save_payload(out_path, chunk_payload)
@@ -229,6 +299,7 @@ def main() -> None:
             chunk_size=args.chunk_size,
             start=start,
             stop=stop,
+            visual_token_ablation=args.visual_token_ablation,
         )
 
     for chunk_start in range(start, stop, args.chunk_size):
@@ -237,7 +308,7 @@ def main() -> None:
         out_path = chunk_path(args.chunks_dir, args.chunk_prefix, chunk_start, chunk_end)
 
         if args.skip_existing_complete:
-            count = existing_chunk_count(out_path)
+            count = existing_chunk_count(out_path, args.visual_token_ablation)
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")
                 continue
@@ -269,6 +340,8 @@ def main() -> None:
             args.prompt_style,
             "--modality-mode",
             args.modality_mode,
+            "--visual-token-ablation",
+            args.visual_token_ablation,
             "--save-dtype",
             args.save_dtype,
             "--gc-every",

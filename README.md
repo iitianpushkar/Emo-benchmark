@@ -165,9 +165,48 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
 
-## Alpha-weighted modality fusion
+## Zero visual-token ablation
 
-For modality overshadowing, extract video-only and text-only embeddings from the same Qwen LM hidden-state space:
+To measure the effect of Qwen's visual features while keeping the multimodal prompt and sequence layout fixed, extract a matched embedding set with the projected visual tokens replaced by zero immediately before they enter the language model:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_test_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_zero_video_tokens/meld_test.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --visual-token-ablation zero \
+  --resume
+```
+
+The processor creates the normal mixed token sequence and video grid. The extractor embeds that sequence, finds the exact positions whose token ID equals Qwen's `video_token_id`, and replaces those embedding vectors with zeros. It omits `pixel_values_videos`, so the visual encoder is not run. Qwen then continues through its language model with the original video-placeholder count, attention mask, multimodal position IDs, utterance, and prompt. The exact `video_token_count` is saved in each sample's metadata.
+
+Run the same command with the dev index and `meld_dev.pt` output path for development-set analysis. For chunked Kaggle extraction, `run_qwen_shared_chunks.py` accepts the same `--visual-token-ablation zero` option.
+
+Compare the zero-video embeddings with the existing full video+utterance embeddings using the same saved MLP:
+
+```bash
+python scripts/compare_visual_token_ablation.py \
+  --checkpoint outputs/qwen2_5_vl_3b_shared/best_mlp.pt \
+  --full-pt embeddings/qwen2_5_vl_3b_shared/meld_test_clean.pt \
+  --zero-video-pt embeddings/qwen2_5_vl_3b_zero_video_tokens/meld_test.pt \
+  --output-dir outputs/qwen2_5_vl_3b_visual_ablation \
+  --split-name test
+```
+
+The comparison aligns conditions by `sample_id`, applies the joint checkpoint's saved normalization to both, and reports paired accuracy/F1 results plus per-class softmax probabilities, log probabilities, and the log-probability difference:
+
+```text
+visual_delta(class) = log p(class | full video, utterance)
+                    - log p(class | zero visual tokens, utterance)
+```
+
+## Alpha-weighted modality fusion diagnostic
+
+For a linear-fusion sensitivity analysis, extract video-only and text-only embeddings from the same Qwen LM hidden-state space:
 
 ```bash
 python scripts/extract_qwen_shared_embeddings.py \
@@ -230,7 +269,7 @@ python scripts/summarize_alpha_sweep.py \
   --output-csv outputs/qwen2_5_vl_3b_alpha/summary.csv
 ```
 
-Here `alpha` is the video weight and `1 - alpha` is the text weight. If the best macro F1 occurs near `alpha=0.0`, the classifier is text-dominant. If it occurs near `alpha=1.0`, it is video-dominant. A best value near `alpha=0.5` suggests balanced fusion.
+Here `alpha` is the video weight and `1 - alpha` is the text weight. The curve measures sensitivity to an artificial linear combination of independently extracted embeddings; it does not recover Qwen's internal modality weights or establish modality overshadowing by itself.
 
 If Kaggle stops a long extraction run, rerun the same command with `--resume`. Existing `sample_ids` in the output file are skipped, so only missing clips are extracted:
 
