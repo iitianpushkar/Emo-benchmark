@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
+DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +53,12 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "zero"],
         default="none",
         help="Visual-token intervention forwarded to extract_qwen_shared_embeddings.py.",
+    )
+    parser.add_argument(
+        "--utterance-token-ablation",
+        choices=["none", "zero"],
+        default="none",
+        help="Utterance-token intervention forwarded to extract_qwen_shared_embeddings.py.",
     )
     parser.add_argument("--save-dtype", choices=["float16", "float32"], default="float32")
     parser.add_argument("--gc-every", type=int, default=5)
@@ -107,7 +114,39 @@ def payload_visual_ablation_implementation(payload: dict[str, Any]) -> str | Non
     return next(iter(nested_values), None)
 
 
-def existing_chunk_count(path: Path, expected_visual_token_ablation: str) -> int | None:
+def payload_utterance_token_ablation(payload: dict[str, Any]) -> str:
+    config = payload.get("config", {})
+    if "utterance_token_ablation" in config:
+        return str(config["utterance_token_ablation"])
+    nested_values = {
+        str(item.get("config", {}).get("utterance_token_ablation", "none"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes utterance-token ablation modes: {sorted(nested_values)}")
+    return next(iter(nested_values), "none")
+
+
+def payload_utterance_ablation_implementation(payload: dict[str, Any]) -> str | None:
+    config = payload.get("config", {})
+    if "utterance_ablation_implementation" in config:
+        return str(config["utterance_ablation_implementation"])
+    nested_values = {
+        str(item.get("config", {}).get("utterance_ablation_implementation"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict) and item.get("config", {}).get("utterance_ablation_implementation") is not None
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes utterance-ablation implementations: {sorted(nested_values)}")
+    return next(iter(nested_values), None)
+
+
+def existing_chunk_count(
+    path: Path,
+    expected_visual_token_ablation: str,
+    expected_utterance_token_ablation: str,
+) -> int | None:
     if not path.exists():
         return None
     try:
@@ -124,6 +163,19 @@ def existing_chunk_count(path: Path, expected_visual_token_ablation: str) -> int
                 raise ValueError(
                     f"Existing chunk {path} has visual_ablation_implementation={saved_implementation!r}, "
                     f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+                )
+        saved_utterance_ablation = payload_utterance_token_ablation(payload)
+        if saved_utterance_ablation != expected_utterance_token_ablation:
+            raise ValueError(
+                f"Existing chunk {path} has utterance_token_ablation={saved_utterance_ablation!r}, "
+                f"expected {expected_utterance_token_ablation!r}"
+            )
+        if expected_utterance_token_ablation == "zero":
+            saved_implementation = payload_utterance_ablation_implementation(payload)
+            if saved_implementation != DIRECT_UTTERANCE_ZERO_IMPLEMENTATION:
+                raise ValueError(
+                    f"Existing chunk {path} has utterance_ablation_implementation={saved_implementation!r}, "
+                    f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
                 )
         return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
     except ValueError:
@@ -148,6 +200,7 @@ def seed_chunks_from_existing_pt(
     start: int,
     stop: int,
     visual_token_ablation: str,
+    utterance_token_ablation: str,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
         return
@@ -169,6 +222,19 @@ def seed_chunks_from_existing_pt(
             raise ValueError(
                 f"Cannot seed from {seed_pt}; visual_ablation_implementation={saved_implementation!r}, "
                 f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+            )
+    saved_utterance_ablation = payload_utterance_token_ablation(payload)
+    if saved_utterance_ablation != utterance_token_ablation:
+        raise ValueError(
+            f"Cannot seed {utterance_token_ablation!r} utterance extraction from {seed_pt}; "
+            f"the seed contains {saved_utterance_ablation!r} embeddings"
+        )
+    if utterance_token_ablation == "zero":
+        saved_implementation = payload_utterance_ablation_implementation(payload)
+        if saved_implementation != DIRECT_UTTERANCE_ZERO_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot seed from {seed_pt}; utterance_ablation_implementation={saved_implementation!r}, "
+                f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
             )
 
     sample_ids = [str(item) for item in payload.get("sample_ids", [])]
@@ -251,6 +317,12 @@ def seed_chunks_from_existing_pt(
                 "visual_ablation_implementation": (
                     DIRECT_ZERO_IMPLEMENTATION if visual_token_ablation == "zero" else "none"
                 ),
+                "utterance_token_ablation": utterance_token_ablation,
+                "utterance_ablation_implementation": (
+                    DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
+                    if utterance_token_ablation == "zero"
+                    else "none"
+                ),
             },
         }
         save_payload(out_path, chunk_payload)
@@ -300,6 +372,7 @@ def main() -> None:
             start=start,
             stop=stop,
             visual_token_ablation=args.visual_token_ablation,
+            utterance_token_ablation=args.utterance_token_ablation,
         )
 
     for chunk_start in range(start, stop, args.chunk_size):
@@ -308,7 +381,11 @@ def main() -> None:
         out_path = chunk_path(args.chunks_dir, args.chunk_prefix, chunk_start, chunk_end)
 
         if args.skip_existing_complete:
-            count = existing_chunk_count(out_path, args.visual_token_ablation)
+            count = existing_chunk_count(
+                out_path,
+                args.visual_token_ablation,
+                args.utterance_token_ablation,
+            )
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")
                 continue
@@ -342,6 +419,8 @@ def main() -> None:
             args.modality_mode,
             "--visual-token-ablation",
             args.visual_token_ablation,
+            "--utterance-token-ablation",
+            args.utterance_token_ablation,
             "--save-dtype",
             args.save_dtype,
             "--gc-every",

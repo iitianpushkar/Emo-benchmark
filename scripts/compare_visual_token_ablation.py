@@ -16,13 +16,20 @@ from torch.utils.data import DataLoader, TensorDataset
 from evaluate_mlp import EmotionMLP, choose_device, compute_metrics, standardize_with_checkpoint
 
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
+DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Paired evaluation of full and zero-visual-token embeddings.")
+    parser = argparse.ArgumentParser(description="Paired evaluation of full and zeroed-modality-token embeddings.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Joint video+utterance MLP checkpoint.")
     parser.add_argument("--full-pt", type=Path, required=True, help="Existing full video+utterance embeddings.")
-    parser.add_argument("--zero-video-pt", type=Path, required=True, help="Embeddings extracted with zero visual tokens.")
+    ablation_group = parser.add_mutually_exclusive_group(required=True)
+    ablation_group.add_argument("--zero-video-pt", type=Path, help="Embeddings extracted with zero visual tokens.")
+    ablation_group.add_argument(
+        "--zero-utterance-pt",
+        type=Path,
+        help="Embeddings extracted with zero utterance tokens.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--split-name", default="test")
     parser.add_argument("--batch-size", type=int, default=128)
@@ -53,6 +60,28 @@ def visual_ablation_implementations(payload: dict[str, Any]) -> set[str]:
         str(item.get("config", {}).get("visual_ablation_implementation"))
         for item in config.get("merged_from", [])
         if isinstance(item, dict) and item.get("config", {}).get("visual_ablation_implementation") is not None
+    }
+
+
+def utterance_token_ablation_modes(payload: dict[str, Any]) -> set[str]:
+    config = payload.get("config", {})
+    if "utterance_token_ablation" in config:
+        return {str(config["utterance_token_ablation"])}
+    return {
+        str(item.get("config", {}).get("utterance_token_ablation", "none"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+    }
+
+
+def utterance_ablation_implementations(payload: dict[str, Any]) -> set[str]:
+    config = payload.get("config", {})
+    if "utterance_ablation_implementation" in config:
+        return {str(config["utterance_ablation_implementation"])}
+    return {
+        str(item.get("config", {}).get("utterance_ablation_implementation"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict) and item.get("config", {}).get("utterance_ablation_implementation") is not None
     }
 
 
@@ -148,17 +177,19 @@ def condition_metrics(y_true: np.ndarray, log_probs: torch.Tensor, label_names: 
 def summarize_deltas(
     labels: torch.Tensor,
     full_log_probs: torch.Tensor,
-    zero_log_probs: torch.Tensor,
+    ablated_log_probs: torch.Tensor,
     label_names: list[str],
+    ablated_key: str,
+    effect_key: str,
 ) -> dict[str, Any]:
     row_index = torch.arange(labels.shape[0])
     full_gold = full_log_probs[row_index, labels]
-    zero_gold = zero_log_probs[row_index, labels]
-    gold_delta = full_gold - zero_gold
+    ablated_gold = ablated_log_probs[row_index, labels]
+    gold_delta = full_gold - ablated_gold
     full_pred = full_log_probs.argmax(dim=-1)
-    zero_pred = zero_log_probs.argmax(dim=-1)
+    ablated_pred = ablated_log_probs.argmax(dim=-1)
     full_correct = full_pred.eq(labels)
-    zero_correct = zero_pred.eq(labels)
+    ablated_correct = ablated_pred.eq(labels)
 
     per_true_class = {}
     for class_id, class_name in enumerate(label_names):
@@ -167,28 +198,28 @@ def summarize_deltas(
         per_true_class[class_name] = {
             "support": int(mask.sum()),
             "mean_full_gold_log_probability": float(full_gold[mask].mean()),
-            "mean_zero_video_gold_log_probability": float(zero_gold[mask].mean()),
-            "mean_visual_delta_gold_log_probability": float(class_delta.mean()),
-            "visual_benefit_rate": float(class_delta.gt(0).float().mean()),
+            f"mean_{ablated_key}_gold_log_probability": float(ablated_gold[mask].mean()),
+            f"mean_{effect_key}_delta_gold_log_probability": float(class_delta.mean()),
+            f"{effect_key}_benefit_rate": float(class_delta.gt(0).float().mean()),
         }
 
     per_output_class = {}
-    all_class_deltas = full_log_probs - zero_log_probs
+    all_class_deltas = full_log_probs - ablated_log_probs
     for class_id, class_name in enumerate(label_names):
         per_output_class[class_name] = {
             "mean_full_log_probability": float(full_log_probs[:, class_id].mean()),
-            "mean_zero_video_log_probability": float(zero_log_probs[:, class_id].mean()),
-            "mean_visual_delta_log_probability": float(all_class_deltas[:, class_id].mean()),
+            f"mean_{ablated_key}_log_probability": float(ablated_log_probs[:, class_id].mean()),
+            f"mean_{effect_key}_delta_log_probability": float(all_class_deltas[:, class_id].mean()),
         }
 
     return {
         "mean_full_gold_log_probability": float(full_gold.mean()),
-        "mean_zero_video_gold_log_probability": float(zero_gold.mean()),
-        "mean_visual_delta_gold_log_probability": float(gold_delta.mean()),
-        "visual_benefit_rate": float(gold_delta.gt(0).float().mean()),
-        "prediction_change_rate": float(full_pred.ne(zero_pred).float().mean()),
-        "zero_wrong_to_full_correct": int((~zero_correct & full_correct).sum()),
-        "zero_correct_to_full_wrong": int((zero_correct & ~full_correct).sum()),
+        f"mean_{ablated_key}_gold_log_probability": float(ablated_gold.mean()),
+        f"mean_{effect_key}_delta_gold_log_probability": float(gold_delta.mean()),
+        f"{effect_key}_benefit_rate": float(gold_delta.gt(0).float().mean()),
+        "prediction_change_rate": float(full_pred.ne(ablated_pred).float().mean()),
+        "ablated_wrong_to_full_correct": int((~ablated_correct & full_correct).sum()),
+        "ablated_correct_to_full_wrong": int((ablated_correct & ~full_correct).sum()),
         "per_true_class": per_true_class,
         "per_output_class": per_output_class,
     }
@@ -200,11 +231,13 @@ def write_paired_predictions(
     metadata: list[dict[str, Any]],
     labels: torch.Tensor,
     full_log_probs: torch.Tensor,
-    zero_log_probs: torch.Tensor,
+    ablated_log_probs: torch.Tensor,
     label_names: list[str],
+    ablated_key: str,
+    effect_key: str,
 ) -> None:
     full_pred = full_log_probs.argmax(dim=-1)
-    zero_pred = zero_log_probs.argmax(dim=-1)
+    ablated_pred = ablated_log_probs.argmax(dim=-1)
     fields = [
         "sample_id",
         "true_id",
@@ -213,24 +246,24 @@ def write_paired_predictions(
         "video_file",
         "full_pred_id",
         "full_pred_label",
-        "zero_video_pred_id",
-        "zero_video_pred_label",
+        f"{ablated_key}_pred_id",
+        f"{ablated_key}_pred_label",
         "full_correct",
-        "zero_video_correct",
+        f"{ablated_key}_correct",
         "full_gold_log_probability",
-        "zero_video_gold_log_probability",
-        "visual_delta_gold_log_probability",
+        f"{ablated_key}_gold_log_probability",
+        f"{effect_key}_delta_gold_log_probability",
         "full_gold_probability",
-        "zero_video_gold_probability",
+        f"{ablated_key}_gold_probability",
     ]
     for class_name in label_names:
         fields.extend(
             [
                 f"full_prob_{class_name}",
-                f"zero_video_prob_{class_name}",
+                f"{ablated_key}_prob_{class_name}",
                 f"full_log_prob_{class_name}",
-                f"zero_video_log_prob_{class_name}",
-                f"visual_delta_log_prob_{class_name}",
+                f"{ablated_key}_log_prob_{class_name}",
+                f"{effect_key}_delta_log_prob_{class_name}",
             ]
         )
 
@@ -240,7 +273,7 @@ def write_paired_predictions(
         for i, sample_id in enumerate(sample_ids):
             true_id = int(labels[i])
             full_pred_id = int(full_pred[i])
-            zero_pred_id = int(zero_pred[i])
+            ablated_pred_id = int(ablated_pred[i])
             meta = metadata[i] if isinstance(metadata[i], dict) else {}
             row = {
                 "sample_id": sample_id,
@@ -250,25 +283,25 @@ def write_paired_predictions(
                 "video_file": meta.get("video_file", meta.get("video_path", "")),
                 "full_pred_id": full_pred_id,
                 "full_pred_label": label_names[full_pred_id],
-                "zero_video_pred_id": zero_pred_id,
-                "zero_video_pred_label": label_names[zero_pred_id],
+                f"{ablated_key}_pred_id": ablated_pred_id,
+                f"{ablated_key}_pred_label": label_names[ablated_pred_id],
                 "full_correct": full_pred_id == true_id,
-                "zero_video_correct": zero_pred_id == true_id,
+                f"{ablated_key}_correct": ablated_pred_id == true_id,
                 "full_gold_log_probability": float(full_log_probs[i, true_id]),
-                "zero_video_gold_log_probability": float(zero_log_probs[i, true_id]),
-                "visual_delta_gold_log_probability": float(
-                    full_log_probs[i, true_id] - zero_log_probs[i, true_id]
+                f"{ablated_key}_gold_log_probability": float(ablated_log_probs[i, true_id]),
+                f"{effect_key}_delta_gold_log_probability": float(
+                    full_log_probs[i, true_id] - ablated_log_probs[i, true_id]
                 ),
                 "full_gold_probability": float(full_log_probs[i, true_id].exp()),
-                "zero_video_gold_probability": float(zero_log_probs[i, true_id].exp()),
+                f"{ablated_key}_gold_probability": float(ablated_log_probs[i, true_id].exp()),
             }
             for class_id, class_name in enumerate(label_names):
                 row[f"full_prob_{class_name}"] = float(full_log_probs[i, class_id].exp())
-                row[f"zero_video_prob_{class_name}"] = float(zero_log_probs[i, class_id].exp())
+                row[f"{ablated_key}_prob_{class_name}"] = float(ablated_log_probs[i, class_id].exp())
                 row[f"full_log_prob_{class_name}"] = float(full_log_probs[i, class_id])
-                row[f"zero_video_log_prob_{class_name}"] = float(zero_log_probs[i, class_id])
-                row[f"visual_delta_log_prob_{class_name}"] = float(
-                    full_log_probs[i, class_id] - zero_log_probs[i, class_id]
+                row[f"{ablated_key}_log_prob_{class_name}"] = float(ablated_log_probs[i, class_id])
+                row[f"{effect_key}_delta_log_prob_{class_name}"] = float(
+                    full_log_probs[i, class_id] - ablated_log_probs[i, class_id]
                 )
             writer.writerow(row)
 
@@ -280,32 +313,60 @@ def main() -> None:
 
     checkpoint = load_payload(args.checkpoint)
     full_payload = load_payload(args.full_pt)
-    zero_payload = load_payload(args.zero_video_pt)
-    full_modes = visual_token_ablation_modes(full_payload)
-    if full_modes and full_modes != {"none"}:
+    ablated_path = args.zero_video_pt or args.zero_utterance_pt
+    if ablated_path is None:
+        raise ValueError("One ablated embedding path is required")
+    ablated_payload = load_payload(ablated_path)
+
+    full_visual_modes = visual_token_ablation_modes(full_payload)
+    full_utterance_modes = utterance_token_ablation_modes(full_payload)
+    if full_visual_modes and full_visual_modes != {"none"}:
         raise ValueError(
-            f"Expected --full-pt to contain only normal embeddings, found modes: {sorted(full_modes)}"
+            f"Expected --full-pt to contain normal visual tokens, found modes: {sorted(full_visual_modes)}"
         )
-    zero_modes = visual_token_ablation_modes(zero_payload)
-    if zero_modes and zero_modes != {"zero"}:
+    if full_utterance_modes and full_utterance_modes != {"none"}:
         raise ValueError(
-            f"Expected --zero-video-pt to contain only zero-token embeddings, found modes: {sorted(zero_modes)}"
+            "Expected --full-pt to contain normal utterance tokens, "
+            f"found modes: {sorted(full_utterance_modes)}"
         )
-    zero_implementations = visual_ablation_implementations(zero_payload)
-    if zero_implementations != {DIRECT_ZERO_IMPLEMENTATION}:
-        raise ValueError(
-            "Expected direct placeholder-zero embeddings, found implementations: "
-            f"{sorted(zero_implementations)}"
-        )
+
+    if args.zero_video_pt is not None:
+        ablation_slug = "visual"
+        ablated_key = "zero_video"
+        effect_key = "visual"
+        visual_modes = visual_token_ablation_modes(ablated_payload)
+        utterance_modes = utterance_token_ablation_modes(ablated_payload)
+        if visual_modes != {"zero"} or (utterance_modes and utterance_modes != {"none"}):
+            raise ValueError("--zero-video-pt must contain only the video-zero condition")
+        implementations = visual_ablation_implementations(ablated_payload)
+        if implementations != {DIRECT_ZERO_IMPLEMENTATION}:
+            raise ValueError(
+                "Expected direct placeholder-zero embeddings, found implementations: "
+                f"{sorted(implementations)}"
+            )
+    else:
+        ablation_slug = "utterance"
+        ablated_key = "zero_utterance"
+        effect_key = "utterance"
+        visual_modes = visual_token_ablation_modes(ablated_payload)
+        utterance_modes = utterance_token_ablation_modes(ablated_payload)
+        if utterance_modes != {"zero"} or (visual_modes and visual_modes != {"none"}):
+            raise ValueError("--zero-utterance-pt must contain only the utterance-zero condition")
+        implementations = utterance_ablation_implementations(ablated_payload)
+        if implementations != {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION}:
+            raise ValueError(
+                "Expected direct utterance-zero embeddings, found implementations: "
+                f"{sorted(implementations)}"
+            )
     label_names = checkpoint.get("label_names", full_payload.get("label_names"))
     if not label_names:
         raise ValueError("No label_names found in checkpoint or embedding payload")
 
-    full_x, zero_x, labels, sample_ids, metadata, dropped_non_finite = align_payloads(
+    full_x, ablated_x, labels, sample_ids, metadata, dropped_non_finite = align_payloads(
         full_payload,
-        zero_payload,
+        ablated_payload,
         args.full_pt,
-        args.zero_video_pt,
+        ablated_path,
     )
     input_dim = int(checkpoint["input_dim"])
     if full_x.shape[1] != input_dim:
@@ -320,32 +381,39 @@ def main() -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
 
     full_x = standardize_with_checkpoint(full_x, checkpoint)
-    zero_x = standardize_with_checkpoint(zero_x, checkpoint)
+    ablated_x = standardize_with_checkpoint(ablated_x, checkpoint)
     full_log_probs = predict_log_probs(model, full_x, args.batch_size, device)
-    zero_log_probs = predict_log_probs(model, zero_x, args.batch_size, device)
+    ablated_log_probs = predict_log_probs(model, ablated_x, args.batch_size, device)
     y_true = labels.numpy()
 
     full_metrics = condition_metrics(y_true, full_log_probs, label_names)
-    zero_metrics = condition_metrics(y_true, zero_log_probs, label_names)
+    ablated_metrics = condition_metrics(y_true, ablated_log_probs, label_names)
     summary = {
         "split": args.split_name,
         "num_aligned_samples": len(sample_ids),
         "dropped_non_finite_pairs": dropped_non_finite,
         "full_metrics": full_metrics,
-        "zero_video_metrics": zero_metrics,
+        f"{ablated_key}_metrics": ablated_metrics,
         "metric_deltas_full_minus_zero": {
-            "accuracy": full_metrics["accuracy"] - zero_metrics["accuracy"],
-            "macro_f1": full_metrics["macro_f1"] - zero_metrics["macro_f1"],
-            "weighted_f1": full_metrics["weighted_f1"] - zero_metrics["weighted_f1"],
+            "accuracy": full_metrics["accuracy"] - ablated_metrics["accuracy"],
+            "macro_f1": full_metrics["macro_f1"] - ablated_metrics["macro_f1"],
+            "weighted_f1": full_metrics["weighted_f1"] - ablated_metrics["weighted_f1"],
         },
-        "log_probability_analysis": summarize_deltas(labels, full_log_probs, zero_log_probs, label_names),
+        "log_probability_analysis": summarize_deltas(
+            labels,
+            full_log_probs,
+            ablated_log_probs,
+            label_names,
+            ablated_key,
+            effect_key,
+        ),
         "checkpoint": str(args.checkpoint),
         "full_embeddings": str(args.full_pt),
-        "zero_video_embeddings": str(args.zero_video_pt),
+        f"{ablated_key}_embeddings": str(ablated_path),
     }
 
-    summary_path = args.output_dir / f"{args.split_name}_visual_ablation_summary.json"
-    predictions_path = args.output_dir / f"{args.split_name}_visual_ablation_predictions.csv"
+    summary_path = args.output_dir / f"{args.split_name}_{ablation_slug}_ablation_summary.json"
+    predictions_path = args.output_dir / f"{args.split_name}_{ablation_slug}_ablation_predictions.csv"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     write_paired_predictions(
         predictions_path,
@@ -353,17 +421,22 @@ def main() -> None:
         metadata,
         labels,
         full_log_probs,
-        zero_log_probs,
+        ablated_log_probs,
         label_names,
+        ablated_key,
+        effect_key,
     )
 
     print(f"Device: {device}")
     print(f"Aligned samples: {len(sample_ids)}")
     print(f"Full accuracy / macro F1: {full_metrics['accuracy']:.4f} / {full_metrics['macro_f1']:.4f}")
-    print(f"Zero-video accuracy / macro F1: {zero_metrics['accuracy']:.4f} / {zero_metrics['macro_f1']:.4f}")
     print(
-        "Mean visual delta for gold-class log probability: "
-        f"{summary['log_probability_analysis']['mean_visual_delta_gold_log_probability']:.6f}"
+        f"{ablated_key} accuracy / macro F1: "
+        f"{ablated_metrics['accuracy']:.4f} / {ablated_metrics['macro_f1']:.4f}"
+    )
+    print(
+        f"Mean {effect_key} delta for gold-class log probability: "
+        f"{summary['log_probability_analysis'][f'mean_{effect_key}_delta_gold_log_probability']:.6f}"
     )
     print(f"Saved summary: {summary_path}")
     print(f"Saved paired predictions: {predictions_path}")

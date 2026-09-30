@@ -31,6 +31,7 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
+DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +109,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Intervene on projected visual tokens immediately before they enter the language model. "
             "'zero' preserves token count and positions but replaces every visual token value with zero."
+        ),
+    )
+    parser.add_argument(
+        "--utterance-token-ablation",
+        choices=["none", "zero"],
+        default="none",
+        help=(
+            "Intervene on only the MELD utterance token embeddings immediately before the language model. "
+            "'zero' preserves their token positions while leaving the task prompt and visual tokens unchanged."
         ),
     )
     parser.add_argument(
@@ -235,6 +245,7 @@ def load_resume_payload(
     retry_errors: bool,
     modality_mode: str,
     visual_token_ablation: str,
+    utterance_token_ablation: str,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
         return [], [], [], [], [], set()
@@ -246,6 +257,7 @@ def load_resume_payload(
     saved_config = payload.get("config", {})
     saved_modality_mode = saved_config.get("modality_mode")
     saved_ablation = saved_config.get("visual_token_ablation", "none")
+    saved_utterance_ablation = saved_config.get("utterance_token_ablation", "none")
     if saved_modality_mode is not None and saved_modality_mode != modality_mode:
         raise ValueError(
             f"Cannot resume from {path}; modality_mode={saved_modality_mode!r}, expected {modality_mode!r}"
@@ -261,6 +273,18 @@ def load_resume_payload(
             raise ValueError(
                 f"Cannot resume from {path}; visual_ablation_implementation={saved_implementation!r}, "
                 f"expected {DIRECT_ZERO_IMPLEMENTATION!r}"
+            )
+    if saved_utterance_ablation != utterance_token_ablation:
+        raise ValueError(
+            f"Cannot resume from {path}; utterance_token_ablation={saved_utterance_ablation!r}, "
+            f"expected {utterance_token_ablation!r}"
+        )
+    if utterance_token_ablation == "zero":
+        saved_implementation = saved_config.get("utterance_ablation_implementation")
+        if saved_implementation != DIRECT_UTTERANCE_ZERO_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; utterance_ablation_implementation={saved_implementation!r}, "
+                f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
             )
 
     embeddings_tensor = payload["embeddings"].cpu().to(dtype=output_dtype)
@@ -308,89 +332,251 @@ def pool_hidden_states(hidden: torch.Tensor, attention_mask: torch.Tensor, mode:
     raise ValueError(f"Unknown pooling mode: {mode}")
 
 
+def locate_utterance_char_span(rendered_text: str, prompt: str, utterance: str) -> tuple[int, int]:
+    """Locate only the utterance value inside the rendered Qwen chat template."""
+    prompt_start = rendered_text.find(prompt)
+    if prompt_start < 0:
+        raise ValueError("Could not locate the emotion prompt inside the rendered chat template")
+
+    marker = f"Utterance: {utterance}"
+    marker_start = prompt.find(marker)
+    if marker_start < 0:
+        raise ValueError("Could not locate the utterance marker inside the emotion prompt")
+
+    utterance_start = prompt_start + marker_start + len("Utterance: ")
+    return utterance_start, utterance_start + len(utterance)
+
+
+def align_template_tokens_to_multimodal_positions(
+    template_ids: list[int],
+    multimodal_ids: list[int],
+    video_token_id: int,
+) -> dict[int, int]:
+    """Map unexpanded chat-template token indices to processor-expanded positions."""
+    mapping: dict[int, int] = {}
+    template_index = 0
+    multimodal_index = 0
+
+    while template_index < len(template_ids):
+        template_token = template_ids[template_index]
+        if template_token == video_token_id:
+            if (
+                multimodal_index >= len(multimodal_ids)
+                or multimodal_ids[multimodal_index] != video_token_id
+            ):
+                raise ValueError("Video placeholder is missing from the processor-expanded input_ids")
+            while (
+                multimodal_index < len(multimodal_ids)
+                and multimodal_ids[multimodal_index] == video_token_id
+            ):
+                multimodal_index += 1
+            template_index += 1
+            continue
+
+        if (
+            multimodal_index >= len(multimodal_ids)
+            or multimodal_ids[multimodal_index] != template_token
+        ):
+            raise ValueError(
+                "Tokenizer input_ids could not be aligned with processor input_ids at "
+                f"template_index={template_index}, multimodal_index={multimodal_index}"
+            )
+        mapping[template_index] = multimodal_index
+        template_index += 1
+        multimodal_index += 1
+
+    if multimodal_index != len(multimodal_ids):
+        raise ValueError(
+            "Processor input_ids contain unmatched trailing tokens: "
+            f"matched={multimodal_index}, total={len(multimodal_ids)}"
+        )
+    return mapping
+
+
+def build_utterance_token_mask(
+    processor: AutoProcessor,
+    rendered_text: str,
+    prompt: str,
+    utterance: str,
+    processor_input_ids: torch.Tensor,
+    video_token_id: int,
+) -> torch.Tensor:
+    """Return a boolean mask for only the utterance tokens in the expanded sequence."""
+    if processor_input_ids.ndim != 2 or processor_input_ids.shape[0] != 1:
+        raise ValueError(
+            "Utterance-token ablation expects input_ids shaped [1, sequence_length], "
+            f"got {tuple(processor_input_ids.shape)}"
+        )
+    if not utterance:
+        raise ValueError("Utterance-token ablation requires a non-empty utterance")
+
+    utterance_start, utterance_end = locate_utterance_char_span(rendered_text, prompt, utterance)
+    tokenized = processor.tokenizer(
+        [rendered_text],
+        padding=True,
+        return_tensors="pt",
+        return_offsets_mapping=True,
+    )
+    template_ids = tokenized["input_ids"][0].tolist()
+    offsets = tokenized["offset_mapping"][0].tolist()
+    multimodal_ids = processor_input_ids[0].detach().cpu().tolist()
+    position_map = align_template_tokens_to_multimodal_positions(
+        template_ids,
+        multimodal_ids,
+        video_token_id,
+    )
+
+    template_utterance_indices = [
+        index
+        for index, (start, end) in enumerate(offsets)
+        if end > utterance_start and start < utterance_end
+    ]
+    if not template_utterance_indices:
+        raise ValueError("Tokenizer offsets did not identify any utterance tokens")
+
+    mask = torch.zeros_like(processor_input_ids, dtype=torch.bool)
+    for template_index in template_utterance_indices:
+        multimodal_position = position_map.get(template_index)
+        if multimodal_position is None:
+            raise ValueError("An utterance token unexpectedly aligned to a video placeholder")
+        mask[0, multimodal_position] = True
+    return mask
+
+
 def forward_multimodal_hidden_state(
     model: Qwen2_5_VLForConditionalGeneration,
     inputs: dict[str, torch.Tensor],
     layer: int,
     visual_token_ablation: str,
+    utterance_token_ablation: str,
+    utterance_token_mask: torch.Tensor | None,
 ) -> torch.Tensor:
     """Return one shared transformer hidden-state tensor before Qwen's LM head."""
     base_model = getattr(model, "model", None)
-    if visual_token_ablation == "zero":
+    utterance_hook = None
+    utterance_hook_calls = 0
+
+    if utterance_token_ablation == "zero":
         if base_model is None:
-            raise AttributeError("Zero-token ablation requires the Qwen base model")
+            raise AttributeError("Utterance-token ablation requires the Qwen base model")
+        if utterance_token_mask is None or not utterance_token_mask.any():
+            raise ValueError("Utterance-token ablation requires a non-empty utterance token mask")
+        language_model = getattr(base_model, "language_model", None)
+        if language_model is None:
+            raise AttributeError("Could not find Qwen language_model for utterance-token ablation")
 
-        input_ids = inputs.get("input_ids")
-        if input_ids is None:
-            raise ValueError("Zero-token ablation requires input_ids to locate video placeholders")
+        def zero_utterance_embeddings(
+            _module: torch.nn.Module,
+            module_args: tuple[Any, ...],
+            module_kwargs: dict[str, Any],
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            nonlocal utterance_hook_calls
+            inputs_embeds = module_kwargs.get("inputs_embeds")
+            if not isinstance(inputs_embeds, torch.Tensor):
+                raise TypeError("Qwen language_model did not receive tensor inputs_embeds")
+            mask = utterance_token_mask.to(device=inputs_embeds.device).unsqueeze(-1)
+            if mask.shape[:2] != inputs_embeds.shape[:2]:
+                raise ValueError(
+                    "Utterance mask and LM embeddings have different sequence shapes: "
+                    f"{tuple(mask.shape[:2])} vs {tuple(inputs_embeds.shape[:2])}"
+                )
+            updated_kwargs = dict(module_kwargs)
+            updated_kwargs["inputs_embeds"] = inputs_embeds.masked_fill(mask, 0.0)
+            utterance_hook_calls += 1
+            return module_args, updated_kwargs
 
-        video_token_id = getattr(base_model.config, "video_token_id", None)
-        if video_token_id is None:
-            raise AttributeError("Qwen config does not expose video_token_id")
-
-        video_mask = input_ids.eq(video_token_id)
-        video_token_count = int(video_mask.sum().item())
-        if video_token_count == 0:
-            raise ValueError("No video placeholder tokens were found in input_ids")
-
-        video_grid_thw = inputs.get("video_grid_thw")
-        if video_grid_thw is None:
-            raise ValueError("Zero-token ablation requires video_grid_thw for multimodal position IDs")
-        spatial_merge_size = int(base_model.config.vision_config.spatial_merge_size)
-        expected_video_tokens = int(
-            (video_grid_thw.prod(dim=-1) // (spatial_merge_size**2)).sum().item()
+        utterance_hook = language_model.register_forward_pre_hook(
+            zero_utterance_embeddings,
+            with_kwargs=True,
         )
-        if video_token_count != expected_video_tokens:
-            raise ValueError(
-                "Video placeholder count does not match the processor grid: "
-                f"placeholders={video_token_count}, expected={expected_video_tokens}"
-            )
 
-        inputs_embeds = base_model.get_input_embeddings()(input_ids)
-        inputs_embeds = inputs_embeds.masked_fill(video_mask.unsqueeze(-1), 0.0)
-
-        # Keep input_ids and grid metadata so Qwen computes its original 3D multimodal
-        # RoPE positions, but omit pixels so the visual encoder is never called.
-        ablated_inputs = {
-            key: value
-            for key, value in inputs.items()
-            if key not in {"pixel_values_videos", "pixel_values"}
-        }
-        ablated_inputs["inputs_embeds"] = inputs_embeds
-        outputs = base_model(
-            **ablated_inputs,
-            output_hidden_states=(layer != -1),
-            use_cache=False,
-            return_dict=True,
-        )
-        return outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
-
-    if base_model is not None:
-        outputs = base_model(
-            **inputs,
-            output_hidden_states=(layer != -1),
-            use_cache=False,
-            return_dict=True,
-        )
-        return outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
-
-    # Fallback for unusual wrappers. logits_to_keep=1 reduces LM-head memory on newer transformers.
     try:
-        outputs = model(
-            **inputs,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-            logits_to_keep=1,
+        if visual_token_ablation == "zero":
+            if base_model is None:
+                raise AttributeError("Zero-token ablation requires the Qwen base model")
+
+            input_ids = inputs.get("input_ids")
+            if input_ids is None:
+                raise ValueError("Zero-token ablation requires input_ids to locate video placeholders")
+
+            video_token_id = getattr(base_model.config, "video_token_id", None)
+            if video_token_id is None:
+                raise AttributeError("Qwen config does not expose video_token_id")
+
+            video_mask = input_ids.eq(video_token_id)
+            video_token_count = int(video_mask.sum().item())
+            if video_token_count == 0:
+                raise ValueError("No video placeholder tokens were found in input_ids")
+
+            video_grid_thw = inputs.get("video_grid_thw")
+            if video_grid_thw is None:
+                raise ValueError("Zero-token ablation requires video_grid_thw for multimodal position IDs")
+            spatial_merge_size = int(base_model.config.vision_config.spatial_merge_size)
+            expected_video_tokens = int(
+                (video_grid_thw.prod(dim=-1) // (spatial_merge_size**2)).sum().item()
+            )
+            if video_token_count != expected_video_tokens:
+                raise ValueError(
+                    "Video placeholder count does not match the processor grid: "
+                    f"placeholders={video_token_count}, expected={expected_video_tokens}"
+                )
+
+            inputs_embeds = base_model.get_input_embeddings()(input_ids)
+            inputs_embeds = inputs_embeds.masked_fill(video_mask.unsqueeze(-1), 0.0)
+
+            # Keep input_ids and grid metadata so Qwen computes its original 3D multimodal
+            # RoPE positions, but omit pixels so the visual encoder is never called.
+            ablated_inputs = {
+                key: value
+                for key, value in inputs.items()
+                if key not in {"pixel_values_videos", "pixel_values"}
+            }
+            ablated_inputs["inputs_embeds"] = inputs_embeds
+            outputs = base_model(
+                **ablated_inputs,
+                output_hidden_states=(layer != -1),
+                use_cache=False,
+                return_dict=True,
+            )
+            hidden = outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
+        elif base_model is not None:
+            outputs = base_model(
+                **inputs,
+                output_hidden_states=(layer != -1),
+                use_cache=False,
+                return_dict=True,
+            )
+            hidden = outputs.last_hidden_state if layer == -1 else outputs.hidden_states[layer]
+        else:
+            if utterance_token_ablation != "none":
+                raise AttributeError("Utterance-token ablation is unavailable for this model wrapper")
+            # Fallback for unusual wrappers. logits_to_keep=1 reduces LM-head memory on newer transformers.
+            try:
+                outputs = model(
+                    **inputs,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                    logits_to_keep=1,
+                )
+            except TypeError:
+                outputs = model(
+                    **inputs,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+            hidden = outputs.hidden_states[layer]
+    finally:
+        if utterance_hook is not None:
+            utterance_hook.remove()
+
+    if utterance_token_ablation == "zero" and utterance_hook_calls != 1:
+        raise RuntimeError(
+            "Utterance-token ablation expected one language-model call, "
+            f"observed {utterance_hook_calls}"
         )
-    except TypeError:
-        outputs = model(
-            **inputs,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-        )
-    return outputs.hidden_states[layer]
+    return hidden
 
 
 def extract_shared_embedding(
@@ -408,7 +594,9 @@ def extract_shared_embedding(
     add_generation_prompt: bool,
     modality_mode: str,
     visual_token_ablation: str,
-) -> tuple[torch.Tensor, int]:
+    utterance_token_ablation: str,
+) -> tuple[torch.Tensor, int, int]:
+    prompt = make_prompt(utterance, prompt_style, modality_mode)
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
@@ -426,13 +614,31 @@ def extract_shared_embedding(
     processor_inputs.update(video_kwargs)
 
     inputs = processor(**processor_inputs)
+    base_model = getattr(model, "model", None)
+    video_token_id = getattr(getattr(base_model, "config", None), "video_token_id", None)
+    if video_token_id is None:
+        raise AttributeError("Qwen config does not expose video_token_id")
+
+    utterance_token_mask = None
+    if utterance_token_ablation == "zero":
+        utterance_token_mask = build_utterance_token_mask(
+            processor=processor,
+            rendered_text=text,
+            prompt=prompt,
+            utterance="" if utterance is None else utterance,
+            processor_input_ids=inputs["input_ids"],
+            video_token_id=video_token_id,
+        )
+    utterance_token_count = (
+        int(utterance_token_mask.sum().item()) if utterance_token_mask is not None else 0
+    )
+
     if visual_token_ablation == "zero":
         # The processor is still the source of truth for placeholder expansion and
         # grid metadata, but its pixel tensor is unnecessary for this intervention.
         inputs.pop("pixel_values_videos", None)
         inputs.pop("pixel_values", None)
     inputs = inputs.to(model.device)
-    video_token_id = getattr(model.model.config, "video_token_id", None)
     video_token_count = (
         int(inputs["input_ids"].eq(video_token_id).sum().item())
         if video_token_id is not None and "input_ids" in inputs
@@ -441,16 +647,23 @@ def extract_shared_embedding(
 
     try:
         with torch.inference_mode():
-            hidden = forward_multimodal_hidden_state(model, inputs, layer, visual_token_ablation)
+            hidden = forward_multimodal_hidden_state(
+                model,
+                inputs,
+                layer,
+                visual_token_ablation,
+                utterance_token_ablation,
+                utterance_token_mask,
+            )
 
         embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
     finally:
-        del messages, text, image_inputs, video_inputs, video_kwargs, processor_inputs, inputs
+        del prompt, messages, text, image_inputs, video_inputs, video_kwargs, processor_inputs, inputs
         if "hidden" in locals():
             del hidden
         cleanup_memory()
 
-    return embedding, video_token_count
+    return embedding, video_token_count, utterance_token_count
 
 
 def save_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -465,6 +678,8 @@ def main() -> None:
 
     if args.visual_token_ablation != "none" and args.modality_mode == "text_only":
         raise ValueError("Visual-token ablation requires a modality mode that includes video")
+    if args.utterance_token_ablation != "none" and args.modality_mode == "video_only":
+        raise ValueError("Utterance-token ablation requires a modality mode that includes the utterance")
 
     video_max_pixels = args.video_max_pixels or int(args.frame_size * args.frame_size * args.max_frames)
     os.environ["VIDEO_MAX_PIXELS"] = str(video_max_pixels)
@@ -490,6 +705,7 @@ def main() -> None:
     print(f"Model: {args.model_id}")
     print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
     print(f"Visual-token ablation: {args.visual_token_ablation}")
+    print(f"Utterance-token ablation: {args.utterance_token_ablation}")
     print(f"Layer: {args.layer}; pooling: {args.pooling}")
     print(f"Prompt style: {args.prompt_style}; add_generation_prompt={not args.no_generation_prompt}")
     print(f"Video sampling: fps={args.fps}, min_frames={args.min_frames}, max_frames={args.max_frames}, frame_size={args.frame_size}")
@@ -523,6 +739,7 @@ def main() -> None:
             retry_errors=args.retry_errors,
             modality_mode=args.modality_mode,
             visual_token_ablation=args.visual_token_ablation,
+            utterance_token_ablation=args.utterance_token_ablation,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
         print(f"Resume skip set: {len(done_ids)} sample ids")
@@ -547,7 +764,7 @@ def main() -> None:
                 raise FileNotFoundError(video_path)
             if include_video and not args.skip_decord_precheck:
                 precheck_video_with_decord(video_path)
-            embedding, video_token_count = extract_shared_embedding(
+            embedding, video_token_count, utterance_token_count = extract_shared_embedding(
                 model=model,
                 processor=processor,
                 video_path=video_path if include_video else None,
@@ -562,6 +779,7 @@ def main() -> None:
                 add_generation_prompt=not args.no_generation_prompt,
                 modality_mode=args.modality_mode,
                 visual_token_ablation=args.visual_token_ablation,
+                utterance_token_ablation=args.utterance_token_ablation,
             )
             embeddings.append(embedding.to(dtype=output_dtype))
             labels.append(int(row["emotion_id"]))
@@ -574,7 +792,14 @@ def main() -> None:
             row_metadata["visual_ablation_implementation"] = (
                 DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
             )
+            row_metadata["utterance_token_ablation"] = args.utterance_token_ablation
+            row_metadata["utterance_ablation_implementation"] = (
+                DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
+                if args.utterance_token_ablation == "zero"
+                else "none"
+            )
             row_metadata["video_token_count"] = video_token_count
+            row_metadata["utterance_token_count"] = utterance_token_count
             metadata.append(row_metadata)
             done_ids.add(sample_id)
         except torch.cuda.OutOfMemoryError:
@@ -604,9 +829,15 @@ def main() -> None:
                     "embedding_type": (
                         f"shared_lm_{args.modality_mode}"
                         + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
+                        + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                     ),
                     "visual_ablation_implementation": (
                         DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
+                    ),
+                    "utterance_ablation_implementation": (
+                        DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
+                        if args.utterance_token_ablation == "zero"
+                        else "none"
                     ),
                     "include_video": include_video,
                     "include_utterance": include_utterance,
@@ -633,9 +864,15 @@ def main() -> None:
             "embedding_type": (
                 f"shared_lm_{args.modality_mode}"
                 + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
+                + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
             ),
             "visual_ablation_implementation": (
                 DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
+            ),
+            "utterance_ablation_implementation": (
+                DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
+                if args.utterance_token_ablation == "zero"
+                else "none"
             ),
             "include_video": include_video,
             "include_utterance": include_utterance,

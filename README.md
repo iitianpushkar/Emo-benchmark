@@ -204,6 +204,38 @@ visual_delta(class) = log p(class | full video, utterance)
                     - log p(class | zero visual tokens, utterance)
 ```
 
+## Zero utterance-token ablation
+
+To keep the real video and task prompt while replacing only the MELD utterance token embeddings with zeros immediately before Qwen's language model:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_test_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_zero_utterance_tokens/meld_test.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --utterance-token-ablation zero \
+  --resume
+```
+
+The extractor locates the utterance with tokenizer character offsets, maps those tokens through the processor's expanded video-placeholder sequence, and zeroes only their LM input embeddings. Visual tokens, task instructions, emotion choices, special tokens, attention mask, and positions remain unchanged. Each sample records its exact `utterance_token_count`.
+
+Compare against the existing full embeddings with the fixed joint MLP:
+
+```bash
+python scripts/compare_modality_token_ablation.py \
+  --checkpoint outputs/qwen2_5_vl_3b_shared/best_mlp.pt \
+  --full-pt embeddings/qwen2_5_vl_3b_shared/meld_test_clean.pt \
+  --zero-utterance-pt embeddings/qwen2_5_vl_3b_zero_utterance_tokens/meld_test.pt \
+  --output-dir outputs/qwen2_5_vl_3b_utterance_ablation \
+  --split-name test
+```
+
+Passing both `--visual-token-ablation zero` and `--utterance-token-ablation zero` extracts the prompt-only condition while preserving both modality position blocks.
+
 ## Alpha-weighted modality fusion diagnostic
 
 For a linear-fusion sensitivity analysis, extract video-only and text-only embeddings from the same Qwen LM hidden-state space:
