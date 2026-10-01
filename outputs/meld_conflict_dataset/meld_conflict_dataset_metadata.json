@@ -1,0 +1,41 @@
+{
+  "dataset": "MELD utterance-video class conflict matrix",
+  "labels": [
+    "anger",
+    "disgust",
+    "fear",
+    "joy",
+    "neutral",
+    "sadness",
+    "surprise"
+  ],
+  "base_seed": 20261001,
+  "splits": {
+    "dev": {
+      "source_index": "/Users/pushkarsingh/code/Emo-benchmark/outputs/indexes/meld_dev_index.csv",
+      "source_rows": 1108,
+      "matrix_rows": 7756,
+      "conflict_rows": 6648,
+      "original_aligned_rows": 1108,
+      "same_class_control_rows": 1108,
+      "matrix_csv": "/Users/pushkarsingh/code/Emo-benchmark/outputs/meld_conflict_dataset/meld_dev_conflict_matrix.csv",
+      "same_class_controls_csv": "/Users/pushkarsingh/code/Emo-benchmark/outputs/meld_conflict_dataset/meld_dev_same_class_controls.csv"
+    },
+    "test": {
+      "source_index": "/Users/pushkarsingh/code/Emo-benchmark/outputs/indexes/meld_test_index.csv",
+      "source_rows": 2610,
+      "matrix_rows": 18270,
+      "conflict_rows": 15660,
+      "original_aligned_rows": 2610,
+      "same_class_control_rows": 2610,
+      "matrix_csv": "/Users/pushkarsingh/code/Emo-benchmark/outputs/meld_conflict_dataset/meld_test_conflict_matrix.csv",
+      "same_class_controls_csv": "/Users/pushkarsingh/code/Emo-benchmark/outputs/meld_conflict_dataset/meld_test_same_class_controls.csv"
+    }
+  },
+  "protocol": {
+    "matrix": "For each utterance, retain its original video for the matching source-emotion cell and assign one balanced cross-dialogue donor video from every other source-emotion class.",
+    "same_class_controls": "For each utterance, assign one balanced cross-dialogue donor video with the same MELD source-emotion label.",
+    "donor_reuse": "Balanced within each ordered utterance-class/video-class cell."
+  },
+  "label_limitation": "MELD labels describe the original multimodal sample. The utterance_source_emotion and video_source_emotion fields are inherited source labels, not independent modality-only annotations."
+}
