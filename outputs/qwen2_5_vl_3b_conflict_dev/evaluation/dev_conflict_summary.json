@@ -1,0 +1,277 @@
+{
+  "dataset": "MELD dev cross-class utterance-video conflicts",
+  "interpretation_note": "MELD source emotions are inherited multimodal labels, not independently verified utterance-only or video-only ground truth. Agreement metrics quantify model preference.",
+  "num_conflict_pairs_in_csv": 6648,
+  "num_evaluated_pairs": 6574,
+  "num_missing_pair_embeddings": 74,
+  "num_extra_embedding_ids": 0,
+  "num_non_finite_embeddings_dropped": 74,
+  "num_extraction_errors": 0,
+  "overall": {
+    "utterance_follow_rate": 0.5430483723760268,
+    "video_follow_rate": 0.0990264679038637,
+    "other_prediction_rate": 0.3579251597201095,
+    "utterance_preference_rate": 0.8084879829631884,
+    "mean_utterance_probability": 0.4800505012077997,
+    "mean_video_probability": 0.1062768760517305,
+    "mean_utterance_minus_video_log_probability": 3.8431938205550136
+  },
+  "prediction_vs_utterance_source_label": {
+    "agreement_accuracy": 0.5430483723760268,
+    "macro_f1": 0.41391990343800134,
+    "weighted_f1": 0.5460726267690182,
+    "classification_report": {
+      "anger": {
+        "precision": 0.3681732580037665,
+        "recall": 0.4310915104740904,
+        "f1-score": 0.3971559167089893,
+        "support": 907.0
+      },
+      "disgust": {
+        "precision": 0.18787878787878787,
+        "recall": 0.23484848484848486,
+        "f1-score": 0.20875420875420875,
+        "support": 132.0
+      },
+      "fear": {
+        "precision": 0.1843137254901961,
+        "recall": 0.19915254237288135,
+        "f1-score": 0.19144602851323828,
+        "support": 236.0
+      },
+      "joy": {
+        "precision": 0.47462406015037595,
+        "recall": 0.5211558307533539,
+        "f1-score": 0.49680275454992623,
+        "support": 969.0
+      },
+      "neutral": {
+        "precision": 0.7231121281464531,
+        "recall": 0.6817691477885652,
+        "f1-score": 0.7018323153803443,
+        "support": 2781.0
+      },
+      "sadness": {
+        "precision": 0.39096267190569745,
+        "recall": 0.30243161094224924,
+        "f1-score": 0.34104541559554413,
+        "support": 658.0
+      },
+      "surprise": {
+        "precision": 0.5585284280936454,
+        "recall": 0.5622895622895623,
+        "f1-score": 0.5604026845637584,
+        "support": 891.0
+      },
+      "accuracy": 0.5430483723760268,
+      "macro avg": {
+        "precision": 0.4125132942384174,
+        "recall": 0.4189626699241696,
+        "f1-score": 0.41391990343800134,
+        "support": 6574.0
+      },
+      "weighted avg": {
+        "precision": 0.5518738963236218,
+        "recall": 0.5430483723760268,
+        "f1-score": 0.5460726267690182,
+        "support": 6574.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        391,
+        41,
+        39,
+        123,
+        175,
+        53,
+        85
+      ],
+      [
+        32,
+        31,
+        10,
+        4,
+        22,
+        19,
+        14
+      ],
+      [
+        60,
+        6,
+        47,
+        35,
+        27,
+        28,
+        33
+      ],
+      [
+        115,
+        8,
+        14,
+        505,
+        240,
+        44,
+        43
+      ],
+      [
+        222,
+        53,
+        89,
+        214,
+        1896,
+        127,
+        180
+      ],
+      [
+        109,
+        21,
+        42,
+        78,
+        168,
+        199,
+        41
+      ],
+      [
+        133,
+        5,
+        14,
+        105,
+        94,
+        39,
+        501
+      ]
+    ]
+  },
+  "prediction_vs_video_source_label": {
+    "agreement_accuracy": 0.0990264679038637,
+    "macro_f1": 0.09664680881507717,
+    "weighted_f1": 0.0963604560025242,
+    "classification_report": {
+      "anger": {
+        "precision": 0.147834274952919,
+        "recall": 0.1643979057591623,
+        "f1-score": 0.15567674764501735,
+        "support": 955.0
+      },
+      "disgust": {
+        "precision": 0.15151515151515152,
+        "recall": 0.02413127413127413,
+        "f1-score": 0.041631973355537054,
+        "support": 1036.0
+      },
+      "fear": {
+        "precision": 0.1450980392156863,
+        "recall": 0.03464419475655431,
+        "f1-score": 0.055933484504913075,
+        "support": 1068.0
+      },
+      "joy": {
+        "precision": 0.12687969924812031,
+        "recall": 0.14453961456102785,
+        "f1-score": 0.13513513513513514,
+        "support": 934.0
+      },
+      "neutral": {
+        "precision": 0.04881769641495042,
+        "recall": 0.2006269592476489,
+        "f1-score": 0.0785276073619632,
+        "support": 638.0
+      },
+      "sadness": {
+        "precision": 0.21218074656188604,
+        "recall": 0.10832497492477432,
+        "f1-score": 0.14342629482071714,
+        "support": 997.0
+      },
+      "surprise": {
+        "precision": 0.06800445930880714,
+        "recall": 0.06448202959830866,
+        "f1-score": 0.06619641888225719,
+        "support": 946.0
+      },
+      "accuracy": 0.0990264679038637,
+      "macro avg": {
+        "precision": 0.1286185810310744,
+        "recall": 0.10587813613982149,
+        "f1-score": 0.09664680881507717,
+        "support": 6574.0
+      },
+      "weighted avg": {
+        "precision": 0.13365437901899943,
+        "recall": 0.0990264679038637,
+        "f1-score": 0.0963604560025242,
+        "support": 6574.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        157,
+        24,
+        24,
+        119,
+        421,
+        65,
+        145
+      ],
+      [
+        161,
+        25,
+        64,
+        186,
+        389,
+        53,
+        158
+      ],
+      [
+        204,
+        28,
+        37,
+        159,
+        439,
+        57,
+        144
+      ],
+      [
+        117,
+        27,
+        32,
+        135,
+        403,
+        86,
+        134
+      ],
+      [
+        125,
+        9,
+        28,
+        167,
+        128,
+        59,
+        122
+      ],
+      [
+        163,
+        24,
+        35,
+        133,
+        401,
+        108,
+        133
+      ],
+      [
+        135,
+        28,
+        35,
+        165,
+        441,
+        81,
+        61
+      ]
+    ]
+  },
+  "files": {
+    "predictions": "/kaggle/working/outputs/qwen2_5_vl_3b_conflict_dev/evaluation/dev_conflict_predictions.csv",
+    "ordered_pair_summary": "/kaggle/working/outputs/qwen2_5_vl_3b_conflict_dev/evaluation/dev_conflict_pair_summary.csv"
+  }
+}
