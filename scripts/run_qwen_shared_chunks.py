@@ -18,6 +18,8 @@ from typing import Any
 import pandas as pd
 import torch
 
+from divprune import DEFAULT_RETAIN_RATIO, IMPLEMENTATION_NAME as DIVPRUNE_IMPLEMENTATION
+
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
 DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
 
@@ -59,6 +61,18 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "zero"],
         default="none",
         help="Utterance-token intervention forwarded to extract_qwen_shared_embeddings.py.",
+    )
+    parser.add_argument(
+        "--visual-token-pruning",
+        choices=["none", "divprune"],
+        default="none",
+        help="Projected visual-token pruning forwarded to extract_qwen_shared_embeddings.py.",
+    )
+    parser.add_argument(
+        "--divprune-retain-ratio",
+        type=float,
+        default=DEFAULT_RETAIN_RATIO,
+        help="Fraction of projected visual tokens retained by DivPrune.",
     )
     parser.add_argument("--save-dtype", choices=["float16", "float32"], default="float32")
     parser.add_argument("--gc-every", type=int, default=5)
@@ -142,10 +156,74 @@ def payload_utterance_ablation_implementation(payload: dict[str, Any]) -> str | 
     return next(iter(nested_values), None)
 
 
+def payload_visual_token_pruning(payload: dict[str, Any]) -> str:
+    config = payload.get("config", {})
+    if "visual_token_pruning" in config:
+        return str(config["visual_token_pruning"])
+    nested_values = {
+        str(item.get("config", {}).get("visual_token_pruning", "none"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes visual-token pruning modes: {sorted(nested_values)}")
+    return next(iter(nested_values), "none")
+
+
+def payload_divprune_retain_ratio(payload: dict[str, Any]) -> float | None:
+    config = payload.get("config", {})
+    if "divprune_retain_ratio" in config:
+        return float(config["divprune_retain_ratio"])
+    nested_values = {
+        float(item.get("config", {}).get("divprune_retain_ratio", DEFAULT_RETAIN_RATIO))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+        and item.get("config", {}).get("visual_token_pruning", "none") == "divprune"
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes DivPrune retain ratios: {sorted(nested_values)}")
+    return next(iter(nested_values), None)
+
+
+def validate_pruning_config(
+    payload: dict[str, Any],
+    expected_pruning: str,
+    expected_retain_ratio: float,
+    context: str,
+) -> None:
+    saved_pruning = payload_visual_token_pruning(payload)
+    if saved_pruning != expected_pruning:
+        raise ValueError(
+            f"{context} has visual_token_pruning={saved_pruning!r}, expected {expected_pruning!r}"
+        )
+    if expected_pruning == "divprune":
+        saved_ratio = payload_divprune_retain_ratio(payload)
+        if saved_ratio is None or abs(saved_ratio - expected_retain_ratio) > 1e-12:
+            raise ValueError(
+                f"{context} has divprune_retain_ratio={saved_ratio}, expected {expected_retain_ratio}"
+            )
+        config = payload.get("config", {})
+        implementations = {
+            str(item.get("config", {}).get("visual_token_pruning_implementation"))
+            for item in config.get("merged_from", [])
+            if isinstance(item, dict)
+        }
+        saved_implementation = config.get("visual_token_pruning_implementation")
+        if saved_implementation is None and len(implementations) == 1:
+            saved_implementation = next(iter(implementations))
+        if saved_implementation != DIVPRUNE_IMPLEMENTATION:
+            raise ValueError(
+                f"{context} has visual_token_pruning_implementation={saved_implementation!r}, "
+                f"expected {DIVPRUNE_IMPLEMENTATION!r}"
+            )
+
+
 def existing_chunk_count(
     path: Path,
     expected_visual_token_ablation: str,
     expected_utterance_token_ablation: str,
+    expected_visual_token_pruning: str,
+    expected_divprune_retain_ratio: float,
 ) -> int | None:
     if not path.exists():
         return None
@@ -177,6 +255,12 @@ def existing_chunk_count(
                     f"Existing chunk {path} has utterance_ablation_implementation={saved_implementation!r}, "
                     f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
                 )
+        validate_pruning_config(
+            payload,
+            expected_visual_token_pruning,
+            expected_divprune_retain_ratio,
+            f"Existing chunk {path}",
+        )
         return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
     except ValueError:
         raise
@@ -201,6 +285,8 @@ def seed_chunks_from_existing_pt(
     stop: int,
     visual_token_ablation: str,
     utterance_token_ablation: str,
+    visual_token_pruning: str,
+    divprune_retain_ratio: float,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
         return
@@ -236,6 +322,12 @@ def seed_chunks_from_existing_pt(
                 f"Cannot seed from {seed_pt}; utterance_ablation_implementation={saved_implementation!r}, "
                 f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
             )
+    validate_pruning_config(
+        payload,
+        visual_token_pruning,
+        divprune_retain_ratio,
+        f"Seed payload {seed_pt}",
+    )
 
     sample_ids = [str(item) for item in payload.get("sample_ids", [])]
     embeddings = payload["embeddings"].cpu()
@@ -323,6 +415,11 @@ def seed_chunks_from_existing_pt(
                     if utterance_token_ablation == "zero"
                     else "none"
                 ),
+                "visual_token_pruning": visual_token_pruning,
+                "divprune_retain_ratio": divprune_retain_ratio,
+                "visual_token_pruning_implementation": (
+                    DIVPRUNE_IMPLEMENTATION if visual_token_pruning == "divprune" else "none"
+                ),
             },
         }
         save_payload(out_path, chunk_payload)
@@ -336,6 +433,10 @@ def main() -> None:
     args = parse_args()
     if args.chunk_size <= 0:
         raise ValueError("--chunk-size must be positive")
+    if not 0.0 < args.divprune_retain_ratio <= 1.0:
+        raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if args.visual_token_pruning != "none" and args.visual_token_ablation != "none":
+        raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
 
     extractor = args.extractor or default_extractor_path()
     if not extractor.exists():
@@ -373,6 +474,8 @@ def main() -> None:
             stop=stop,
             visual_token_ablation=args.visual_token_ablation,
             utterance_token_ablation=args.utterance_token_ablation,
+            visual_token_pruning=args.visual_token_pruning,
+            divprune_retain_ratio=args.divprune_retain_ratio,
         )
 
     for chunk_start in range(start, stop, args.chunk_size):
@@ -385,6 +488,8 @@ def main() -> None:
                 out_path,
                 args.visual_token_ablation,
                 args.utterance_token_ablation,
+                args.visual_token_pruning,
+                args.divprune_retain_ratio,
             )
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")
@@ -421,6 +526,10 @@ def main() -> None:
             args.visual_token_ablation,
             "--utterance-token-ablation",
             args.utterance_token_ablation,
+            "--visual-token-pruning",
+            args.visual_token_pruning,
+            "--divprune-retain-ratio",
+            str(args.divprune_retain_ratio),
             "--save-dtype",
             args.save_dtype,
             "--gc-every",

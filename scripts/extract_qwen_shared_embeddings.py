@@ -29,6 +29,13 @@ from qwen_vl_utils import process_vision_info
 from tqdm.auto import tqdm
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+from divprune import (
+    DEFAULT_RETAIN_RATIO,
+    IMPLEMENTATION_NAME as DIVPRUNE_IMPLEMENTATION,
+    REFERENCE_COMMIT as DIVPRUNE_REFERENCE_COMMIT,
+    build_divprune_sequence_indices,
+)
+
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
 DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
@@ -119,6 +126,21 @@ def parse_args() -> argparse.Namespace:
             "Intervene on only the MELD utterance token embeddings immediately before the language model. "
             "'zero' preserves their token positions while leaving the task prompt and visual tokens unchanged."
         ),
+    )
+    parser.add_argument(
+        "--visual-token-pruning",
+        choices=["none", "divprune"],
+        default="none",
+        help=(
+            "Optionally prune projected visual tokens immediately before the first LM decoder layer. "
+            "DivPrune uses cosine-distance max-min diversity selection."
+        ),
+    )
+    parser.add_argument(
+        "--divprune-retain-ratio",
+        type=float,
+        default=DEFAULT_RETAIN_RATIO,
+        help="Fraction of projected visual tokens retained by DivPrune (official default: 0.098).",
     )
     parser.add_argument(
         "--trust-remote-code",
@@ -246,6 +268,8 @@ def load_resume_payload(
     modality_mode: str,
     visual_token_ablation: str,
     utterance_token_ablation: str,
+    visual_token_pruning: str,
+    divprune_retain_ratio: float,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
         return [], [], [], [], [], set()
@@ -258,6 +282,7 @@ def load_resume_payload(
     saved_modality_mode = saved_config.get("modality_mode")
     saved_ablation = saved_config.get("visual_token_ablation", "none")
     saved_utterance_ablation = saved_config.get("utterance_token_ablation", "none")
+    saved_pruning = saved_config.get("visual_token_pruning", "none")
     if saved_modality_mode is not None and saved_modality_mode != modality_mode:
         raise ValueError(
             f"Cannot resume from {path}; modality_mode={saved_modality_mode!r}, expected {modality_mode!r}"
@@ -285,6 +310,24 @@ def load_resume_payload(
             raise ValueError(
                 f"Cannot resume from {path}; utterance_ablation_implementation={saved_implementation!r}, "
                 f"expected {DIRECT_UTTERANCE_ZERO_IMPLEMENTATION!r}"
+            )
+    if saved_pruning != visual_token_pruning:
+        raise ValueError(
+            f"Cannot resume from {path}; visual_token_pruning={saved_pruning!r}, "
+            f"expected {visual_token_pruning!r}"
+        )
+    if visual_token_pruning == "divprune":
+        saved_ratio = float(saved_config.get("divprune_retain_ratio", -1.0))
+        if abs(saved_ratio - divprune_retain_ratio) > 1e-12:
+            raise ValueError(
+                f"Cannot resume from {path}; divprune_retain_ratio={saved_ratio}, "
+                f"expected {divprune_retain_ratio}"
+            )
+        saved_implementation = saved_config.get("visual_token_pruning_implementation")
+        if saved_implementation != DIVPRUNE_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; visual_token_pruning_implementation="
+                f"{saved_implementation!r}, expected {DIVPRUNE_IMPLEMENTATION!r}"
             )
 
     embeddings_tensor = payload["embeddings"].cpu().to(dtype=output_dtype)
@@ -450,11 +493,24 @@ def forward_multimodal_hidden_state(
     visual_token_ablation: str,
     utterance_token_ablation: str,
     utterance_token_mask: torch.Tensor | None,
-) -> torch.Tensor:
+    visual_token_pruning: str,
+    divprune_retain_ratio: float,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Return one shared transformer hidden-state tensor before Qwen's LM head."""
     base_model = getattr(model, "model", None)
     utterance_hook = None
+    pruning_hook = None
     utterance_hook_calls = 0
+    pruning_hook_calls = 0
+    effective_attention_mask = inputs["attention_mask"]
+    retained_visual_token_count = 0
+
+    input_ids = inputs.get("input_ids")
+    video_token_id = getattr(getattr(base_model, "config", None), "video_token_id", None)
+    video_mask = None
+    if input_ids is not None and video_token_id is not None:
+        video_mask = input_ids.eq(video_token_id)
+        retained_visual_token_count = int(video_mask.sum().item())
 
     if utterance_token_ablation == "zero":
         if base_model is None:
@@ -487,6 +543,90 @@ def forward_multimodal_hidden_state(
 
         utterance_hook = language_model.register_forward_pre_hook(
             zero_utterance_embeddings,
+            with_kwargs=True,
+        )
+
+    if visual_token_pruning == "divprune":
+        if base_model is None:
+            raise AttributeError("DivPrune requires the Qwen base model")
+        language_model = getattr(base_model, "language_model", None)
+        if language_model is None:
+            raise AttributeError("Could not find Qwen language_model for DivPrune")
+        if video_mask is None or not video_mask.any():
+            raise ValueError("DivPrune requires video placeholder positions in input_ids")
+        if video_mask.ndim != 2 or video_mask.shape[0] != 1:
+            raise ValueError(
+                f"DivPrune currently expects one sample per forward pass, got {tuple(video_mask.shape)}"
+            )
+
+        def prune_projected_visual_tokens(
+            _module: torch.nn.Module,
+            module_args: tuple[Any, ...],
+            module_kwargs: dict[str, Any],
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            nonlocal pruning_hook_calls, effective_attention_mask, retained_visual_token_count
+            inputs_embeds = module_kwargs.get("inputs_embeds")
+            if not isinstance(inputs_embeds, torch.Tensor):
+                raise TypeError("Qwen language_model did not receive tensor inputs_embeds")
+            if inputs_embeds.ndim != 3 or inputs_embeds.shape[0] != 1:
+                raise ValueError(
+                    "DivPrune expects LM inputs_embeds shaped [1, sequence_length, hidden_dim], "
+                    f"got {tuple(inputs_embeds.shape)}"
+                )
+
+            current_video_mask = video_mask.to(device=inputs_embeds.device)
+            if current_video_mask.shape != inputs_embeds.shape[:2]:
+                raise ValueError(
+                    "Video placeholder mask and LM embeddings have different sequence shapes: "
+                    f"{tuple(current_video_mask.shape)} vs {tuple(inputs_embeds.shape[:2])}"
+                )
+            keep_indices, selected_visual_positions = build_divprune_sequence_indices(
+                inputs_embeds,
+                current_video_mask,
+                retain_ratio=divprune_retain_ratio,
+            )
+
+            updated_kwargs = dict(module_kwargs)
+            updated_kwargs["inputs_embeds"] = inputs_embeds.index_select(1, keep_indices)
+
+            attention_mask = module_kwargs.get("attention_mask")
+            if not isinstance(attention_mask, torch.Tensor):
+                raise TypeError("DivPrune requires a tensor attention_mask")
+            if attention_mask.shape[-1] != inputs_embeds.shape[1]:
+                raise ValueError("Attention mask length does not match the unpruned LM sequence")
+            updated_attention_mask = attention_mask.index_select(
+                attention_mask.ndim - 1,
+                keep_indices.to(attention_mask.device),
+            )
+            updated_kwargs["attention_mask"] = updated_attention_mask
+
+            position_ids = module_kwargs.get("position_ids")
+            if not isinstance(position_ids, torch.Tensor):
+                raise TypeError("DivPrune requires Qwen multimodal position_ids")
+            if position_ids.shape[-1] != inputs_embeds.shape[1]:
+                raise ValueError("Position ID length does not match the unpruned LM sequence")
+            updated_kwargs["position_ids"] = position_ids.index_select(
+                position_ids.ndim - 1,
+                keep_indices.to(position_ids.device),
+            )
+
+            cache_position = module_kwargs.get("cache_position")
+            if (
+                isinstance(cache_position, torch.Tensor)
+                and cache_position.shape[-1] == inputs_embeds.shape[1]
+            ):
+                updated_kwargs["cache_position"] = cache_position.index_select(
+                    cache_position.ndim - 1,
+                    keep_indices.to(cache_position.device),
+                )
+
+            effective_attention_mask = updated_attention_mask
+            retained_visual_token_count = int(selected_visual_positions.numel())
+            pruning_hook_calls += 1
+            return module_args, updated_kwargs
+
+        pruning_hook = language_model.register_forward_pre_hook(
+            prune_projected_visual_tokens,
             with_kwargs=True,
         )
 
@@ -568,6 +708,8 @@ def forward_multimodal_hidden_state(
                 )
             hidden = outputs.hidden_states[layer]
     finally:
+        if pruning_hook is not None:
+            pruning_hook.remove()
         if utterance_hook is not None:
             utterance_hook.remove()
 
@@ -576,7 +718,12 @@ def forward_multimodal_hidden_state(
             "Utterance-token ablation expected one language-model call, "
             f"observed {utterance_hook_calls}"
         )
-    return hidden
+    if visual_token_pruning == "divprune" and pruning_hook_calls != 1:
+        raise RuntimeError(
+            "DivPrune expected one language-model call, "
+            f"observed {pruning_hook_calls}"
+        )
+    return hidden, effective_attention_mask, retained_visual_token_count
 
 
 def extract_shared_embedding(
@@ -595,7 +742,9 @@ def extract_shared_embedding(
     modality_mode: str,
     visual_token_ablation: str,
     utterance_token_ablation: str,
-) -> tuple[torch.Tensor, int, int]:
+    visual_token_pruning: str,
+    divprune_retain_ratio: float,
+) -> tuple[torch.Tensor, int, int, int]:
     prompt = make_prompt(utterance, prompt_style, modality_mode)
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
@@ -647,23 +796,33 @@ def extract_shared_embedding(
 
     try:
         with torch.inference_mode():
-            hidden = forward_multimodal_hidden_state(
+            (
+                hidden,
+                effective_attention_mask,
+                retained_video_token_count,
+            ) = forward_multimodal_hidden_state(
                 model,
                 inputs,
                 layer,
                 visual_token_ablation,
                 utterance_token_ablation,
                 utterance_token_mask,
+                visual_token_pruning,
+                divprune_retain_ratio,
             )
 
-        embedding = pool_hidden_states(hidden.detach().float().cpu(), inputs["attention_mask"].detach().cpu(), pooling)
+        embedding = pool_hidden_states(
+            hidden.detach().float().cpu(),
+            effective_attention_mask.detach().cpu(),
+            pooling,
+        )
     finally:
         del prompt, messages, text, image_inputs, video_inputs, video_kwargs, processor_inputs, inputs
         if "hidden" in locals():
             del hidden
         cleanup_memory()
 
-    return embedding, video_token_count, utterance_token_count
+    return embedding, video_token_count, retained_video_token_count, utterance_token_count
 
 
 def save_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -680,6 +839,12 @@ def main() -> None:
         raise ValueError("Visual-token ablation requires a modality mode that includes video")
     if args.utterance_token_ablation != "none" and args.modality_mode == "video_only":
         raise ValueError("Utterance-token ablation requires a modality mode that includes the utterance")
+    if args.visual_token_pruning != "none" and args.modality_mode == "text_only":
+        raise ValueError("Visual-token pruning requires a modality mode that includes video")
+    if args.visual_token_pruning != "none" and args.visual_token_ablation != "none":
+        raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
+    if not 0.0 < args.divprune_retain_ratio <= 1.0:
+        raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
 
     video_max_pixels = args.video_max_pixels or int(args.frame_size * args.frame_size * args.max_frames)
     os.environ["VIDEO_MAX_PIXELS"] = str(video_max_pixels)
@@ -706,6 +871,10 @@ def main() -> None:
     print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
     print(f"Visual-token ablation: {args.visual_token_ablation}")
     print(f"Utterance-token ablation: {args.utterance_token_ablation}")
+    print(
+        f"Visual-token pruning: {args.visual_token_pruning}; "
+        f"DivPrune retain ratio={args.divprune_retain_ratio}"
+    )
     print(f"Layer: {args.layer}; pooling: {args.pooling}")
     print(f"Prompt style: {args.prompt_style}; add_generation_prompt={not args.no_generation_prompt}")
     print(f"Video sampling: fps={args.fps}, min_frames={args.min_frames}, max_frames={args.max_frames}, frame_size={args.frame_size}")
@@ -740,6 +909,8 @@ def main() -> None:
             modality_mode=args.modality_mode,
             visual_token_ablation=args.visual_token_ablation,
             utterance_token_ablation=args.utterance_token_ablation,
+            visual_token_pruning=args.visual_token_pruning,
+            divprune_retain_ratio=args.divprune_retain_ratio,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
         print(f"Resume skip set: {len(done_ids)} sample ids")
@@ -764,7 +935,12 @@ def main() -> None:
                 raise FileNotFoundError(video_path)
             if include_video and not args.skip_decord_precheck:
                 precheck_video_with_decord(video_path)
-            embedding, video_token_count, utterance_token_count = extract_shared_embedding(
+            (
+                embedding,
+                video_token_count,
+                retained_video_token_count,
+                utterance_token_count,
+            ) = extract_shared_embedding(
                 model=model,
                 processor=processor,
                 video_path=video_path if include_video else None,
@@ -780,7 +956,11 @@ def main() -> None:
                 modality_mode=args.modality_mode,
                 visual_token_ablation=args.visual_token_ablation,
                 utterance_token_ablation=args.utterance_token_ablation,
+                visual_token_pruning=args.visual_token_pruning,
+                divprune_retain_ratio=args.divprune_retain_ratio,
             )
+            if not torch.isfinite(embedding).all():
+                raise ValueError("Extracted embedding contains NaN or Inf values")
             embeddings.append(embedding.to(dtype=output_dtype))
             labels.append(int(row["emotion_id"]))
             sample_ids.append(sample_id)
@@ -799,6 +979,19 @@ def main() -> None:
                 else "none"
             )
             row_metadata["video_token_count"] = video_token_count
+            row_metadata["original_visual_token_count"] = video_token_count
+            row_metadata["retained_visual_token_count"] = retained_video_token_count
+            row_metadata["pruned_visual_token_count"] = video_token_count - retained_video_token_count
+            row_metadata["actual_visual_token_retain_ratio"] = (
+                retained_video_token_count / video_token_count if video_token_count else None
+            )
+            row_metadata["visual_token_pruning"] = args.visual_token_pruning
+            row_metadata["visual_token_pruning_implementation"] = (
+                DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+            )
+            row_metadata["divprune_reference_commit"] = (
+                DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
+            )
             row_metadata["utterance_token_count"] = utterance_token_count
             metadata.append(row_metadata)
             done_ids.add(sample_id)
@@ -830,6 +1023,7 @@ def main() -> None:
                         f"shared_lm_{args.modality_mode}"
                         + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                         + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
+                        + ("_divprune" if args.visual_token_pruning == "divprune" else "")
                     ),
                     "visual_ablation_implementation": (
                         DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -838,6 +1032,12 @@ def main() -> None:
                         DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
                         if args.utterance_token_ablation == "zero"
                         else "none"
+                    ),
+                    "visual_token_pruning_implementation": (
+                        DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+                    ),
+                    "divprune_reference_commit": (
+                        DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
                     ),
                     "include_video": include_video,
                     "include_utterance": include_utterance,
@@ -865,6 +1065,7 @@ def main() -> None:
                 f"shared_lm_{args.modality_mode}"
                 + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                 + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
+                + ("_divprune" if args.visual_token_pruning == "divprune" else "")
             ),
             "visual_ablation_implementation": (
                 DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -873,6 +1074,12 @@ def main() -> None:
                 DIRECT_UTTERANCE_ZERO_IMPLEMENTATION
                 if args.utterance_token_ablation == "zero"
                 else "none"
+            ),
+            "visual_token_pruning_implementation": (
+                DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+            ),
+            "divprune_reference_commit": (
+                DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
             ),
             "include_video": include_video,
             "include_utterance": include_utterance,

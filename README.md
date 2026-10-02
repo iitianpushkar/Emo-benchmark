@@ -165,6 +165,50 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
 
+## DivPrune visual-token extraction
+
+To apply the [official DivPrune](https://github.com/vbdi/divprune) max-min
+cosine selection to Qwen's projected video tokens before the first
+language-model decoder layer:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_dev_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_divprune_shared/meld_dev.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --visual-token-pruning divprune \
+  --divprune-retain-ratio 0.098
+```
+
+The default ratio follows the DivPrune authors' released configuration. Qwen
+first computes its normal projected video features and multimodal position IDs.
+The extractor retains the max-min-diverse visual subset, restores selected
+tokens to original sequence order, removes the remaining visual positions, and
+slices the attention mask and three-dimensional position IDs consistently. All
+text and special tokens are retained. Per-sample metadata records original,
+retained, and pruned visual-token counts.
+
+The same options work with chunked extraction:
+
+```bash
+python scripts/run_qwen_shared_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/qwen2_5_vl_3b_divprune_shared_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --visual-token-pruning divprune \
+  --divprune-retain-ratio 0.098 \
+  --save-dtype float32
+```
+
+Pruning and zero visual-token ablation are intentionally mutually exclusive.
+Resume and seed checks reject files created with another pruning method or
+retention ratio.
+
 ## Zero visual-token ablation
 
 To measure the effect of Qwen's visual features while keeping the multimodal prompt and sequence layout fixed, extract a matched embedding set with the projected visual tokens replaced by zero immediately before they enter the language model:
