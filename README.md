@@ -165,6 +165,68 @@ python scripts/extract_qwen_shared_embeddings.py \
 
 This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
 
+## Diverse-frame extraction at 20% retention
+
+To select frames before Qwen's vision encoder, embed the decoded candidate
+frames with frozen DINOv2-base and retain a centroid-seeded max-min cosine
+diverse subset:
+
+```bash
+python scripts/extract_qwen_shared_embeddings.py \
+  --index-csv outputs/indexes/meld_dev_index.csv \
+  --output-pt embeddings/qwen2_5_vl_3b_diverse_frames_020/meld_dev.pt \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-size 224 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --frame-selection diverse \
+  --frame-retain-ratio 0.20 \
+  --frame-encoder-model facebook/dinov2-base \
+  --frame-encoder-device cuda \
+  --frame-encoder-batch-size 16 \
+  --save-dtype float32
+```
+
+Selection starts from the frame nearest the normalized embedding centroid,
+greedily adds the frame with the largest minimum cosine distance from the
+selected set, and restores chronological order before Qwen processing. The
+original decoded frames are passed to Qwen; DINOv2 embeddings are used only
+for selection. The effective FPS is adjusted to preserve the clip's average
+duration after pruning.
+
+Each sample records `candidate_frame_count`, `retained_frame_count`,
+`actual_frame_retain_ratio`, `selected_frame_indices`,
+`frame_selection_seconds`, and the candidate/Qwen sampling FPS values. With 64
+candidate frames, standard rounding retains 13 frames. Short clips retain at
+least one frame; Qwen's processor remains responsible for any temporal padding
+required by its patching scheme.
+
+For full split extraction, use the resumable chunk runner:
+
+```bash
+python scripts/run_qwen_shared_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/qwen2_5_vl_3b_diverse_frames_020_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-selection diverse \
+  --frame-retain-ratio 0.20 \
+  --frame-encoder-model facebook/dinov2-base \
+  --frame-encoder-device cuda \
+  --frame-encoder-batch-size 16 \
+  --save-dtype float32 \
+  --skip-existing-complete
+```
+
+Resume, seed, and completed-chunk checks reject outputs produced with a
+different frame-selection mode, retention ratio, encoder, or implementation.
+
 ## DivPrune visual-token extraction
 
 To apply the [official DivPrune](https://github.com/vbdi/divprune) max-min

@@ -17,6 +17,7 @@ import argparse
 import gc
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,12 @@ from divprune import (
     REFERENCE_COMMIT as DIVPRUNE_REFERENCE_COMMIT,
     build_divprune_sequence_indices,
 )
+from frame_diversity import (
+    DEFAULT_ENCODER_MODEL as DEFAULT_FRAME_ENCODER_MODEL,
+    DEFAULT_RETAIN_RATIO as DEFAULT_FRAME_RETAIN_RATIO,
+    IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
+    FrameDiversitySelector,
+)
 
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
@@ -50,6 +57,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=64, help="Maximum sampled frames per video.")
     parser.add_argument("--min-frames", type=int, default=4, help="Minimum sampled frames per video.")
     parser.add_argument("--frame-size", type=int, default=224, help="Square resize size for video frames.")
+    parser.add_argument(
+        "--frame-selection",
+        choices=["none", "diverse"],
+        default="none",
+        help="Optionally retain a cosine-diverse subset of decoded frames before Qwen processing.",
+    )
+    parser.add_argument(
+        "--frame-retain-ratio",
+        type=float,
+        default=DEFAULT_FRAME_RETAIN_RATIO,
+        help="Fraction of decoded candidate frames retained by diverse frame selection (default: 0.20).",
+    )
+    parser.add_argument(
+        "--frame-encoder-model",
+        default=DEFAULT_FRAME_ENCODER_MODEL,
+        help="Frozen Hugging Face image encoder used to embed candidate frames.",
+    )
+    parser.add_argument(
+        "--frame-encoder-device",
+        default="cpu",
+        help="Device for the lightweight frame-selection encoder. CPU avoids competing with Qwen for VRAM.",
+    )
+    parser.add_argument(
+        "--frame-encoder-batch-size",
+        type=int,
+        default=32,
+        help="Candidate-frame batch size for the frame-selection encoder.",
+    )
     parser.add_argument(
         "--video-max-pixels",
         type=int,
@@ -270,6 +305,9 @@ def load_resume_payload(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    frame_selection: str,
+    frame_retain_ratio: float,
+    frame_encoder_model: str,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
         return [], [], [], [], [], set()
@@ -283,6 +321,7 @@ def load_resume_payload(
     saved_ablation = saved_config.get("visual_token_ablation", "none")
     saved_utterance_ablation = saved_config.get("utterance_token_ablation", "none")
     saved_pruning = saved_config.get("visual_token_pruning", "none")
+    saved_frame_selection = saved_config.get("frame_selection", "none")
     if saved_modality_mode is not None and saved_modality_mode != modality_mode:
         raise ValueError(
             f"Cannot resume from {path}; modality_mode={saved_modality_mode!r}, expected {modality_mode!r}"
@@ -316,6 +355,30 @@ def load_resume_payload(
             f"Cannot resume from {path}; visual_token_pruning={saved_pruning!r}, "
             f"expected {visual_token_pruning!r}"
         )
+    if saved_frame_selection != frame_selection:
+        raise ValueError(
+            f"Cannot resume from {path}; frame_selection={saved_frame_selection!r}, "
+            f"expected {frame_selection!r}"
+        )
+    if frame_selection == "diverse":
+        saved_ratio = float(saved_config.get("frame_retain_ratio", -1.0))
+        if abs(saved_ratio - frame_retain_ratio) > 1e-12:
+            raise ValueError(
+                f"Cannot resume from {path}; frame_retain_ratio={saved_ratio}, "
+                f"expected {frame_retain_ratio}"
+            )
+        saved_model = saved_config.get("frame_encoder_model")
+        if saved_model != frame_encoder_model:
+            raise ValueError(
+                f"Cannot resume from {path}; frame_encoder_model={saved_model!r}, "
+                f"expected {frame_encoder_model!r}"
+            )
+        saved_implementation = saved_config.get("frame_selection_implementation")
+        if saved_implementation != FRAME_SELECTION_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; frame_selection_implementation="
+                f"{saved_implementation!r}, expected {FRAME_SELECTION_IMPLEMENTATION!r}"
+            )
     if visual_token_pruning == "divprune":
         saved_ratio = float(saved_config.get("divprune_retain_ratio", -1.0))
         if abs(saved_ratio - divprune_retain_ratio) > 1e-12:
@@ -744,12 +807,63 @@ def extract_shared_embedding(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
-) -> tuple[torch.Tensor, int, int, int]:
+    frame_selector: FrameDiversitySelector | None,
+    frame_retain_ratio: float,
+) -> tuple[torch.Tensor, int, int, int, dict[str, Any]]:
     prompt = make_prompt(utterance, prompt_style, modality_mode)
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
     video_kwargs = fix_video_kwargs(video_kwargs)
+
+    frame_selection_metadata: dict[str, Any] = {
+        "candidate_frame_count": None,
+        "retained_frame_count": None,
+        "actual_frame_retain_ratio": None,
+        "selected_frame_indices": None,
+        "frame_selection_seconds": None,
+        "candidate_sampling_fps": None,
+        "qwen_input_fps": None,
+    }
+    if frame_selector is not None:
+        if not video_inputs or len(video_inputs) != 1:
+            raise ValueError(
+                "Diverse frame selection expects exactly one decoded video per sample"
+            )
+        candidate_frames = video_inputs[0]
+        if not isinstance(candidate_frames, torch.Tensor) or candidate_frames.ndim != 4:
+            raise ValueError(
+                "Diverse frame selection expected a decoded TCHW video tensor, "
+                f"got {type(candidate_frames).__name__}"
+            )
+        selection_start = time.perf_counter()
+        selected_frames, selected_indices = frame_selector.select(
+            candidate_frames,
+            retain_ratio=frame_retain_ratio,
+        )
+        selection_seconds = time.perf_counter() - selection_start
+        candidate_count = int(candidate_frames.shape[0])
+        retained_count = int(selected_frames.shape[0])
+        video_inputs = list(video_inputs)
+        video_inputs[0] = selected_frames
+
+        # Qwen uses fps to construct temporal position intervals. The retained
+        # frames still span the original clip, so preserve its average duration.
+        candidate_sampling_fps = (
+            float(video_kwargs["fps"]) if "fps" in video_kwargs else None
+        )
+        if candidate_sampling_fps is not None:
+            video_kwargs["fps"] = candidate_sampling_fps * retained_count / candidate_count
+
+        frame_selection_metadata = {
+            "candidate_frame_count": candidate_count,
+            "retained_frame_count": retained_count,
+            "actual_frame_retain_ratio": retained_count / candidate_count,
+            "selected_frame_indices": selected_indices.tolist(),
+            "frame_selection_seconds": selection_seconds,
+            "candidate_sampling_fps": candidate_sampling_fps,
+            "qwen_input_fps": video_kwargs.get("fps"),
+        }
 
     processor_inputs: dict[str, Any] = {
         "text": [text],
@@ -822,7 +936,13 @@ def extract_shared_embedding(
             del hidden
         cleanup_memory()
 
-    return embedding, video_token_count, retained_video_token_count, utterance_token_count
+    return (
+        embedding,
+        video_token_count,
+        retained_video_token_count,
+        utterance_token_count,
+        frame_selection_metadata,
+    )
 
 
 def save_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -845,6 +965,12 @@ def main() -> None:
         raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if args.frame_selection != "none" and args.modality_mode == "text_only":
+        raise ValueError("Frame selection requires a modality mode that includes video")
+    if not 0.0 < args.frame_retain_ratio <= 1.0:
+        raise ValueError("--frame-retain-ratio must be in the interval (0, 1]")
+    if args.frame_encoder_batch_size <= 0:
+        raise ValueError("--frame-encoder-batch-size must be positive")
 
     video_max_pixels = args.video_max_pixels or int(args.frame_size * args.frame_size * args.max_frames)
     os.environ["VIDEO_MAX_PIXELS"] = str(video_max_pixels)
@@ -869,6 +995,10 @@ def main() -> None:
     print(f"Rows to process: {len(df)}")
     print(f"Model: {args.model_id}")
     print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
+    print(
+        f"Frame selection: {args.frame_selection}; retain ratio={args.frame_retain_ratio}; "
+        f"encoder={args.frame_encoder_model}"
+    )
     print(f"Visual-token ablation: {args.visual_token_ablation}")
     print(f"Utterance-token ablation: {args.utterance_token_ablation}")
     print(
@@ -895,6 +1025,15 @@ def main() -> None:
         model_kwargs["trust_remote_code"] = True
         processor_kwargs["trust_remote_code"] = True
 
+    frame_selector = None
+    if args.frame_selection == "diverse":
+        frame_selector = FrameDiversitySelector(
+            model_id=args.frame_encoder_model,
+            device=args.frame_encoder_device,
+            batch_size=args.frame_encoder_batch_size,
+            trust_remote_code=args.trust_remote_code,
+        )
+
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_id, **model_kwargs)
     processor = AutoProcessor.from_pretrained(args.model_id, **processor_kwargs)
     model.eval()
@@ -911,6 +1050,9 @@ def main() -> None:
             utterance_token_ablation=args.utterance_token_ablation,
             visual_token_pruning=args.visual_token_pruning,
             divprune_retain_ratio=args.divprune_retain_ratio,
+            frame_selection=args.frame_selection,
+            frame_retain_ratio=args.frame_retain_ratio,
+            frame_encoder_model=args.frame_encoder_model,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
         print(f"Resume skip set: {len(done_ids)} sample ids")
@@ -940,6 +1082,7 @@ def main() -> None:
                 video_token_count,
                 retained_video_token_count,
                 utterance_token_count,
+                frame_selection_metadata,
             ) = extract_shared_embedding(
                 model=model,
                 processor=processor,
@@ -958,6 +1101,8 @@ def main() -> None:
                 utterance_token_ablation=args.utterance_token_ablation,
                 visual_token_pruning=args.visual_token_pruning,
                 divprune_retain_ratio=args.divprune_retain_ratio,
+                frame_selector=frame_selector,
+                frame_retain_ratio=args.frame_retain_ratio,
             )
             if not torch.isfinite(embedding).all():
                 raise ValueError("Extracted embedding contains NaN or Inf values")
@@ -993,6 +1138,14 @@ def main() -> None:
                 DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
             )
             row_metadata["utterance_token_count"] = utterance_token_count
+            row_metadata.update(frame_selection_metadata)
+            row_metadata["frame_selection"] = args.frame_selection
+            row_metadata["frame_selection_implementation"] = (
+                FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
+            )
+            row_metadata["frame_encoder_model"] = (
+                args.frame_encoder_model if args.frame_selection == "diverse" else None
+            )
             metadata.append(row_metadata)
             done_ids.add(sample_id)
         except torch.cuda.OutOfMemoryError:
@@ -1024,6 +1177,7 @@ def main() -> None:
                         + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                         + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                         + ("_divprune" if args.visual_token_pruning == "divprune" else "")
+                        + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
                     ),
                     "visual_ablation_implementation": (
                         DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -1038,6 +1192,9 @@ def main() -> None:
                     ),
                     "divprune_reference_commit": (
                         DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
+                    ),
+                    "frame_selection_implementation": (
+                        FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
                     ),
                     "include_video": include_video,
                     "include_utterance": include_utterance,
@@ -1066,6 +1223,7 @@ def main() -> None:
                 + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                 + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                 + ("_divprune" if args.visual_token_pruning == "divprune" else "")
+                + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
             ),
             "visual_ablation_implementation": (
                 DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -1080,6 +1238,9 @@ def main() -> None:
             ),
             "divprune_reference_commit": (
                 DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
+            ),
+            "frame_selection_implementation": (
+                FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
             ),
             "include_video": include_video,
             "include_utterance": include_utterance,

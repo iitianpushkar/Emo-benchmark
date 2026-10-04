@@ -19,6 +19,11 @@ import pandas as pd
 import torch
 
 from divprune import DEFAULT_RETAIN_RATIO, IMPLEMENTATION_NAME as DIVPRUNE_IMPLEMENTATION
+from frame_diversity import (
+    DEFAULT_ENCODER_MODEL as DEFAULT_FRAME_ENCODER_MODEL,
+    DEFAULT_RETAIN_RATIO as DEFAULT_FRAME_RETAIN_RATIO,
+    IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
+)
 
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
 DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
@@ -42,6 +47,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=64, help="Maximum sampled frames per video.")
     parser.add_argument("--min-frames", type=int, default=4, help="Minimum sampled frames per video.")
     parser.add_argument("--frame-size", type=int, default=224, help="Square resize size for video frames.")
+    parser.add_argument(
+        "--frame-selection",
+        choices=["none", "diverse"],
+        default="none",
+        help="Decoded-frame selection forwarded to extract_qwen_shared_embeddings.py.",
+    )
+    parser.add_argument(
+        "--frame-retain-ratio",
+        type=float,
+        default=DEFAULT_FRAME_RETAIN_RATIO,
+        help="Fraction of candidate frames retained by diverse selection (default: 0.20).",
+    )
+    parser.add_argument(
+        "--frame-encoder-model",
+        default=DEFAULT_FRAME_ENCODER_MODEL,
+        help="Frozen Hugging Face image encoder used for frame selection.",
+    )
+    parser.add_argument("--frame-encoder-device", default="cpu")
+    parser.add_argument("--frame-encoder-batch-size", type=int, default=32)
     parser.add_argument("--pooling", choices=["last", "mean", "max"], default="last", help="Pooling used by extractor.")
     parser.add_argument("--prompt-style", choices=["emotion_task", "utterance_only"], default="emotion_task")
     parser.add_argument(
@@ -185,6 +209,72 @@ def payload_divprune_retain_ratio(payload: dict[str, Any]) -> float | None:
     return next(iter(nested_values), None)
 
 
+def payload_frame_selection(payload: dict[str, Any]) -> str:
+    config = payload.get("config", {})
+    if "frame_selection" in config:
+        return str(config["frame_selection"])
+    nested_values = {
+        str(item.get("config", {}).get("frame_selection", "none"))
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes frame-selection modes: {sorted(nested_values)}")
+    return next(iter(nested_values), "none")
+
+
+def payload_frame_selection_value(payload: dict[str, Any], key: str) -> Any:
+    config = payload.get("config", {})
+    if key in config:
+        return config[key]
+    nested_values = {
+        item.get("config", {}).get(key)
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+        and item.get("config", {}).get("frame_selection", "none") == "diverse"
+    }
+    nested_values.discard(None)
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes {key} values: {sorted(nested_values)}")
+    return next(iter(nested_values), None)
+
+
+def validate_frame_selection_config(
+    payload: dict[str, Any],
+    expected_selection: str,
+    expected_retain_ratio: float,
+    expected_encoder_model: str,
+    context: str,
+) -> None:
+    saved_selection = payload_frame_selection(payload)
+    if saved_selection != expected_selection:
+        raise ValueError(
+            f"{context} has frame_selection={saved_selection!r}, expected {expected_selection!r}"
+        )
+    if expected_selection != "diverse":
+        return
+
+    saved_ratio = payload_frame_selection_value(payload, "frame_retain_ratio")
+    if saved_ratio is None or abs(float(saved_ratio) - expected_retain_ratio) > 1e-12:
+        raise ValueError(
+            f"{context} has frame_retain_ratio={saved_ratio}, expected {expected_retain_ratio}"
+        )
+    saved_model = payload_frame_selection_value(payload, "frame_encoder_model")
+    if saved_model != expected_encoder_model:
+        raise ValueError(
+            f"{context} has frame_encoder_model={saved_model!r}, expected {expected_encoder_model!r}"
+        )
+    saved_implementation = payload_frame_selection_value(
+        payload,
+        "frame_selection_implementation",
+    )
+    if saved_implementation != FRAME_SELECTION_IMPLEMENTATION:
+        raise ValueError(
+            f"{context} has frame_selection_implementation={saved_implementation!r}, "
+            f"expected {FRAME_SELECTION_IMPLEMENTATION!r}"
+        )
+
+
 def validate_pruning_config(
     payload: dict[str, Any],
     expected_pruning: str,
@@ -224,6 +314,9 @@ def existing_chunk_count(
     expected_utterance_token_ablation: str,
     expected_visual_token_pruning: str,
     expected_divprune_retain_ratio: float,
+    expected_frame_selection: str,
+    expected_frame_retain_ratio: float,
+    expected_frame_encoder_model: str,
 ) -> int | None:
     if not path.exists():
         return None
@@ -261,6 +354,13 @@ def existing_chunk_count(
             expected_divprune_retain_ratio,
             f"Existing chunk {path}",
         )
+        validate_frame_selection_config(
+            payload,
+            expected_frame_selection,
+            expected_frame_retain_ratio,
+            expected_frame_encoder_model,
+            f"Existing chunk {path}",
+        )
         return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
     except ValueError:
         raise
@@ -287,6 +387,9 @@ def seed_chunks_from_existing_pt(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    frame_selection: str,
+    frame_retain_ratio: float,
+    frame_encoder_model: str,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
         return
@@ -326,6 +429,13 @@ def seed_chunks_from_existing_pt(
         payload,
         visual_token_pruning,
         divprune_retain_ratio,
+        f"Seed payload {seed_pt}",
+    )
+    validate_frame_selection_config(
+        payload,
+        frame_selection,
+        frame_retain_ratio,
+        frame_encoder_model,
         f"Seed payload {seed_pt}",
     )
 
@@ -420,6 +530,12 @@ def seed_chunks_from_existing_pt(
                 "visual_token_pruning_implementation": (
                     DIVPRUNE_IMPLEMENTATION if visual_token_pruning == "divprune" else "none"
                 ),
+                "frame_selection": frame_selection,
+                "frame_retain_ratio": frame_retain_ratio,
+                "frame_encoder_model": frame_encoder_model,
+                "frame_selection_implementation": (
+                    FRAME_SELECTION_IMPLEMENTATION if frame_selection == "diverse" else "none"
+                ),
             },
         }
         save_payload(out_path, chunk_payload)
@@ -435,6 +551,10 @@ def main() -> None:
         raise ValueError("--chunk-size must be positive")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if not 0.0 < args.frame_retain_ratio <= 1.0:
+        raise ValueError("--frame-retain-ratio must be in the interval (0, 1]")
+    if args.frame_encoder_batch_size <= 0:
+        raise ValueError("--frame-encoder-batch-size must be positive")
     if args.visual_token_pruning != "none" and args.visual_token_ablation != "none":
         raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
 
@@ -476,6 +596,9 @@ def main() -> None:
             utterance_token_ablation=args.utterance_token_ablation,
             visual_token_pruning=args.visual_token_pruning,
             divprune_retain_ratio=args.divprune_retain_ratio,
+            frame_selection=args.frame_selection,
+            frame_retain_ratio=args.frame_retain_ratio,
+            frame_encoder_model=args.frame_encoder_model,
         )
 
     for chunk_start in range(start, stop, args.chunk_size):
@@ -490,6 +613,9 @@ def main() -> None:
                 args.utterance_token_ablation,
                 args.visual_token_pruning,
                 args.divprune_retain_ratio,
+                args.frame_selection,
+                args.frame_retain_ratio,
+                args.frame_encoder_model,
             )
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")
@@ -516,6 +642,16 @@ def main() -> None:
             str(args.min_frames),
             "--frame-size",
             str(args.frame_size),
+            "--frame-selection",
+            args.frame_selection,
+            "--frame-retain-ratio",
+            str(args.frame_retain_ratio),
+            "--frame-encoder-model",
+            args.frame_encoder_model,
+            "--frame-encoder-device",
+            args.frame_encoder_device,
+            "--frame-encoder-batch-size",
+            str(args.frame_encoder_batch_size),
             "--pooling",
             args.pooling,
             "--prompt-style",
