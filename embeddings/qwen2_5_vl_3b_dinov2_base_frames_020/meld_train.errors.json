@@ -1,0 +1,27 @@
+[
+  {
+    "sample_id": "train_dia54_utt14",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia54_utt14.mp4",
+    "error": "ValueError('Extracted embedding contains NaN or Inf values')"
+  },
+  {
+    "sample_id": "train_dia114_utt2",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia114_utt2.mp4",
+    "error": "ValueError('Extracted embedding contains NaN or Inf values')"
+  },
+  {
+    "sample_id": "train_dia125_utt3",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia125_utt3.mp4",
+    "error": "RuntimeError('Error reading /kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia125_utt3.mp4...')"
+  },
+  {
+    "sample_id": "train_dia997_utt5",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia997_utt5.mp4",
+    "error": "ValueError('Extracted embedding contains NaN or Inf values')"
+  },
+  {
+    "sample_id": "train_dia1018_utt10",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/train/train_splits/dia1018_utt10.mp4",
+    "error": "ValueError('Extracted embedding contains NaN or Inf values')"
+  }
+]

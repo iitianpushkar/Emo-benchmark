@@ -1,0 +1,7 @@
+[
+  {
+    "sample_id": "test_dia217_utt7",
+    "video_path": "/kaggle/input/datasets/pushkarsingh2005/meld-dataset/MELD.Raw/output_repeated_splits_test/dia217_utt7.mp4",
+    "error": "ValueError('Extracted embedding contains NaN or Inf values')"
+  }
+]
