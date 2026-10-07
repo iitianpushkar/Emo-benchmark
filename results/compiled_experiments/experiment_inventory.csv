@@ -1,0 +1,9 @@
+source,experiment,raw_embeddings,summary_metrics,predictions,notes
+emo-benchmark-shared-results,Shared video+utterance baseline,yes,yes,yes,Canonical baseline on 1102 dev and 2599 test samples
+visual_ablation.zip,Direct-zero visual ablation,yes,yes,yes,Uses the fixed baseline MLP
+utterance_ablation.zip,Direct-zero utterance ablation,yes,yes,yes,Uses the fixed baseline MLP
+alpha_sweep.zip,Post-hoc video/text embedding fusion sweep,yes,yes,yes,Alpha endpoints are not equivalent to direct-zero ablations
+dev_conflict.zip,Cross-class utterance-video conflict evaluation,partial,yes,yes,Labels indicate model preference rather than unimodal ground truth
+divprune_exp_0.3,DivPrune token retention 0.30,yes,yes,yes,Archive paths and source summary incorrectly say 0.70; serialized metadata confirms 0.30
+divprune_exp_0.7,DivPrune token retention 0.70,yes,yes,yes,Serialized metadata confirms 0.70
+frame_pruning.zip,DINOv2-base diverse frame retention 0.20,partial,yes,yes,Pruned run has 1107 dev and 2609 test samples versus baseline 1102 and 2599

@@ -24,6 +24,11 @@ from frame_diversity import (
     DEFAULT_RETAIN_RATIO as DEFAULT_FRAME_RETAIN_RATIO,
     IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
 )
+from random_prune import (
+    DEFAULT_RETAIN_RATIO as DEFAULT_RANDOM_RETAIN_RATIO,
+    DEFAULT_SEED as DEFAULT_RANDOM_SEED,
+    IMPLEMENTATION_NAME as RANDOM_PRUNE_IMPLEMENTATION,
+)
 
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
 DIRECT_UTTERANCE_ZERO_IMPLEMENTATION = "direct_utterance_zero"
@@ -88,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--visual-token-pruning",
-        choices=["none", "divprune"],
+        choices=["none", "divprune", "random"],
         default="none",
         help="Projected visual-token pruning forwarded to extract_qwen_shared_embeddings.py.",
     )
@@ -97,6 +102,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RETAIN_RATIO,
         help="Fraction of projected visual tokens retained by DivPrune.",
+    )
+    parser.add_argument(
+        "--random-prune-retain-ratio",
+        type=float,
+        default=DEFAULT_RANDOM_RETAIN_RATIO,
+        help="Fraction of projected visual tokens retained by random pruning.",
+    )
+    parser.add_argument(
+        "--random-prune-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help="Base seed for deterministic per-sample random visual-token pruning.",
     )
     parser.add_argument("--save-dtype", choices=["float16", "float32"], default="float32")
     parser.add_argument("--gc-every", type=int, default=5)
@@ -209,6 +226,22 @@ def payload_divprune_retain_ratio(payload: dict[str, Any]) -> float | None:
     return next(iter(nested_values), None)
 
 
+def payload_pruning_value(payload: dict[str, Any], pruning: str, key: str) -> Any:
+    config = payload.get("config", {})
+    if key in config:
+        return config[key]
+    nested_values = {
+        item.get("config", {}).get(key)
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+        and item.get("config", {}).get("visual_token_pruning", "none") == pruning
+    }
+    nested_values.discard(None)
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes {key} values: {sorted(nested_values)}")
+    return next(iter(nested_values), None)
+
+
 def payload_frame_selection(payload: dict[str, Any]) -> str:
     config = payload.get("config", {})
     if "frame_selection" in config:
@@ -278,7 +311,9 @@ def validate_frame_selection_config(
 def validate_pruning_config(
     payload: dict[str, Any],
     expected_pruning: str,
-    expected_retain_ratio: float,
+    expected_divprune_retain_ratio: float,
+    expected_random_retain_ratio: float,
+    expected_random_seed: int,
     context: str,
 ) -> None:
     saved_pruning = payload_visual_token_pruning(payload)
@@ -288,9 +323,10 @@ def validate_pruning_config(
         )
     if expected_pruning == "divprune":
         saved_ratio = payload_divprune_retain_ratio(payload)
-        if saved_ratio is None or abs(saved_ratio - expected_retain_ratio) > 1e-12:
+        if saved_ratio is None or abs(saved_ratio - expected_divprune_retain_ratio) > 1e-12:
             raise ValueError(
-                f"{context} has divprune_retain_ratio={saved_ratio}, expected {expected_retain_ratio}"
+                f"{context} has divprune_retain_ratio={saved_ratio}, "
+                f"expected {expected_divprune_retain_ratio}"
             )
         config = payload.get("config", {})
         implementations = {
@@ -306,6 +342,28 @@ def validate_pruning_config(
                 f"{context} has visual_token_pruning_implementation={saved_implementation!r}, "
                 f"expected {DIVPRUNE_IMPLEMENTATION!r}"
             )
+    if expected_pruning == "random":
+        saved_ratio = payload_pruning_value(payload, "random", "random_prune_retain_ratio")
+        if saved_ratio is None or abs(float(saved_ratio) - expected_random_retain_ratio) > 1e-12:
+            raise ValueError(
+                f"{context} has random_prune_retain_ratio={saved_ratio}, "
+                f"expected {expected_random_retain_ratio}"
+            )
+        saved_seed = payload_pruning_value(payload, "random", "random_prune_seed")
+        if saved_seed is None or int(saved_seed) != expected_random_seed:
+            raise ValueError(
+                f"{context} has random_prune_seed={saved_seed}, expected {expected_random_seed}"
+            )
+        saved_implementation = payload_pruning_value(
+            payload,
+            "random",
+            "visual_token_pruning_implementation",
+        )
+        if saved_implementation != RANDOM_PRUNE_IMPLEMENTATION:
+            raise ValueError(
+                f"{context} has visual_token_pruning_implementation={saved_implementation!r}, "
+                f"expected {RANDOM_PRUNE_IMPLEMENTATION!r}"
+            )
 
 
 def existing_chunk_count(
@@ -314,6 +372,8 @@ def existing_chunk_count(
     expected_utterance_token_ablation: str,
     expected_visual_token_pruning: str,
     expected_divprune_retain_ratio: float,
+    expected_random_retain_ratio: float,
+    expected_random_seed: int,
     expected_frame_selection: str,
     expected_frame_retain_ratio: float,
     expected_frame_encoder_model: str,
@@ -352,6 +412,8 @@ def existing_chunk_count(
             payload,
             expected_visual_token_pruning,
             expected_divprune_retain_ratio,
+            expected_random_retain_ratio,
+            expected_random_seed,
             f"Existing chunk {path}",
         )
         validate_frame_selection_config(
@@ -387,6 +449,8 @@ def seed_chunks_from_existing_pt(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    random_prune_retain_ratio: float,
+    random_prune_seed: int,
     frame_selection: str,
     frame_retain_ratio: float,
     frame_encoder_model: str,
@@ -429,6 +493,8 @@ def seed_chunks_from_existing_pt(
         payload,
         visual_token_pruning,
         divprune_retain_ratio,
+        random_prune_retain_ratio,
+        random_prune_seed,
         f"Seed payload {seed_pt}",
     )
     validate_frame_selection_config(
@@ -527,8 +593,14 @@ def seed_chunks_from_existing_pt(
                 ),
                 "visual_token_pruning": visual_token_pruning,
                 "divprune_retain_ratio": divprune_retain_ratio,
+                "random_prune_retain_ratio": random_prune_retain_ratio,
+                "random_prune_seed": random_prune_seed,
                 "visual_token_pruning_implementation": (
-                    DIVPRUNE_IMPLEMENTATION if visual_token_pruning == "divprune" else "none"
+                    DIVPRUNE_IMPLEMENTATION
+                    if visual_token_pruning == "divprune"
+                    else RANDOM_PRUNE_IMPLEMENTATION
+                    if visual_token_pruning == "random"
+                    else "none"
                 ),
                 "frame_selection": frame_selection,
                 "frame_retain_ratio": frame_retain_ratio,
@@ -551,6 +623,8 @@ def main() -> None:
         raise ValueError("--chunk-size must be positive")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if not 0.0 < args.random_prune_retain_ratio <= 1.0:
+        raise ValueError("--random-prune-retain-ratio must be in the interval (0, 1]")
     if not 0.0 < args.frame_retain_ratio <= 1.0:
         raise ValueError("--frame-retain-ratio must be in the interval (0, 1]")
     if args.frame_encoder_batch_size <= 0:
@@ -596,6 +670,8 @@ def main() -> None:
             utterance_token_ablation=args.utterance_token_ablation,
             visual_token_pruning=args.visual_token_pruning,
             divprune_retain_ratio=args.divprune_retain_ratio,
+            random_prune_retain_ratio=args.random_prune_retain_ratio,
+            random_prune_seed=args.random_prune_seed,
             frame_selection=args.frame_selection,
             frame_retain_ratio=args.frame_retain_ratio,
             frame_encoder_model=args.frame_encoder_model,
@@ -613,6 +689,8 @@ def main() -> None:
                 args.utterance_token_ablation,
                 args.visual_token_pruning,
                 args.divprune_retain_ratio,
+                args.random_prune_retain_ratio,
+                args.random_prune_seed,
                 args.frame_selection,
                 args.frame_retain_ratio,
                 args.frame_encoder_model,
@@ -666,6 +744,10 @@ def main() -> None:
             args.visual_token_pruning,
             "--divprune-retain-ratio",
             str(args.divprune_retain_ratio),
+            "--random-prune-retain-ratio",
+            str(args.random_prune_retain_ratio),
+            "--random-prune-seed",
+            str(args.random_prune_seed),
             "--save-dtype",
             args.save_dtype,
             "--gc-every",

@@ -42,6 +42,13 @@ from frame_diversity import (
     IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
     FrameDiversitySelector,
 )
+from random_prune import (
+    DEFAULT_RETAIN_RATIO as DEFAULT_RANDOM_RETAIN_RATIO,
+    DEFAULT_SEED as DEFAULT_RANDOM_SEED,
+    IMPLEMENTATION_NAME as RANDOM_PRUNE_IMPLEMENTATION,
+    build_random_prune_sequence_indices,
+    sample_seed,
+)
 
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
 DIRECT_ZERO_IMPLEMENTATION = "direct_placeholder_zero"
@@ -164,11 +171,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--visual-token-pruning",
-        choices=["none", "divprune"],
+        choices=["none", "divprune", "random"],
         default="none",
         help=(
             "Optionally prune projected visual tokens immediately before the first LM decoder layer. "
-            "DivPrune uses cosine-distance max-min diversity selection."
+            "DivPrune uses cosine-distance max-min diversity selection; random uses a seeded "
+            "uniform sample as a control."
         ),
     )
     parser.add_argument(
@@ -176,6 +184,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RETAIN_RATIO,
         help="Fraction of projected visual tokens retained by DivPrune (official default: 0.098).",
+    )
+    parser.add_argument(
+        "--random-prune-retain-ratio",
+        type=float,
+        default=DEFAULT_RANDOM_RETAIN_RATIO,
+        help="Fraction of projected visual tokens retained by random pruning (default: 0.30).",
+    )
+    parser.add_argument(
+        "--random-prune-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help="Base seed for deterministic per-sample random visual-token pruning.",
     )
     parser.add_argument(
         "--trust-remote-code",
@@ -305,6 +325,8 @@ def load_resume_payload(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    random_prune_retain_ratio: float,
+    random_prune_seed: int,
     frame_selection: str,
     frame_retain_ratio: float,
     frame_encoder_model: str,
@@ -391,6 +413,25 @@ def load_resume_payload(
             raise ValueError(
                 f"Cannot resume from {path}; visual_token_pruning_implementation="
                 f"{saved_implementation!r}, expected {DIVPRUNE_IMPLEMENTATION!r}"
+            )
+    if visual_token_pruning == "random":
+        saved_ratio = float(saved_config.get("random_prune_retain_ratio", -1.0))
+        if abs(saved_ratio - random_prune_retain_ratio) > 1e-12:
+            raise ValueError(
+                f"Cannot resume from {path}; random_prune_retain_ratio={saved_ratio}, "
+                f"expected {random_prune_retain_ratio}"
+            )
+        saved_seed = int(saved_config.get("random_prune_seed", -1))
+        if saved_seed != random_prune_seed:
+            raise ValueError(
+                f"Cannot resume from {path}; random_prune_seed={saved_seed}, "
+                f"expected {random_prune_seed}"
+            )
+        saved_implementation = saved_config.get("visual_token_pruning_implementation")
+        if saved_implementation != RANDOM_PRUNE_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; visual_token_pruning_implementation="
+                f"{saved_implementation!r}, expected {RANDOM_PRUNE_IMPLEMENTATION!r}"
             )
 
     embeddings_tensor = payload["embeddings"].cpu().to(dtype=output_dtype)
@@ -558,6 +599,8 @@ def forward_multimodal_hidden_state(
     utterance_token_mask: torch.Tensor | None,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    random_prune_retain_ratio: float,
+    random_prune_sample_seed: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Return one shared transformer hidden-state tensor before Qwen's LM head."""
     base_model = getattr(model, "model", None)
@@ -609,17 +652,19 @@ def forward_multimodal_hidden_state(
             with_kwargs=True,
         )
 
-    if visual_token_pruning == "divprune":
+    if visual_token_pruning in {"divprune", "random"}:
+        pruning_name = "DivPrune" if visual_token_pruning == "divprune" else "Random pruning"
         if base_model is None:
-            raise AttributeError("DivPrune requires the Qwen base model")
+            raise AttributeError(f"{pruning_name} requires the Qwen base model")
         language_model = getattr(base_model, "language_model", None)
         if language_model is None:
-            raise AttributeError("Could not find Qwen language_model for DivPrune")
+            raise AttributeError(f"Could not find Qwen language_model for {pruning_name}")
         if video_mask is None or not video_mask.any():
-            raise ValueError("DivPrune requires video placeholder positions in input_ids")
+            raise ValueError(f"{pruning_name} requires video placeholder positions in input_ids")
         if video_mask.ndim != 2 or video_mask.shape[0] != 1:
             raise ValueError(
-                f"DivPrune currently expects one sample per forward pass, got {tuple(video_mask.shape)}"
+                f"{pruning_name} currently expects one sample per forward pass, "
+                f"got {tuple(video_mask.shape)}"
             )
 
         def prune_projected_visual_tokens(
@@ -633,7 +678,8 @@ def forward_multimodal_hidden_state(
                 raise TypeError("Qwen language_model did not receive tensor inputs_embeds")
             if inputs_embeds.ndim != 3 or inputs_embeds.shape[0] != 1:
                 raise ValueError(
-                    "DivPrune expects LM inputs_embeds shaped [1, sequence_length, hidden_dim], "
+                    f"{pruning_name} expects LM inputs_embeds shaped "
+                    "[1, sequence_length, hidden_dim], "
                     f"got {tuple(inputs_embeds.shape)}"
                 )
 
@@ -643,18 +689,26 @@ def forward_multimodal_hidden_state(
                     "Video placeholder mask and LM embeddings have different sequence shapes: "
                     f"{tuple(current_video_mask.shape)} vs {tuple(inputs_embeds.shape[:2])}"
                 )
-            keep_indices, selected_visual_positions = build_divprune_sequence_indices(
-                inputs_embeds,
-                current_video_mask,
-                retain_ratio=divprune_retain_ratio,
-            )
+            if visual_token_pruning == "divprune":
+                keep_indices, selected_visual_positions = build_divprune_sequence_indices(
+                    inputs_embeds,
+                    current_video_mask,
+                    retain_ratio=divprune_retain_ratio,
+                )
+            else:
+                keep_indices, selected_visual_positions = build_random_prune_sequence_indices(
+                    inputs_embeds,
+                    current_video_mask,
+                    retain_ratio=random_prune_retain_ratio,
+                    seed=random_prune_sample_seed,
+                )
 
             updated_kwargs = dict(module_kwargs)
             updated_kwargs["inputs_embeds"] = inputs_embeds.index_select(1, keep_indices)
 
             attention_mask = module_kwargs.get("attention_mask")
             if not isinstance(attention_mask, torch.Tensor):
-                raise TypeError("DivPrune requires a tensor attention_mask")
+                raise TypeError(f"{pruning_name} requires a tensor attention_mask")
             if attention_mask.shape[-1] != inputs_embeds.shape[1]:
                 raise ValueError("Attention mask length does not match the unpruned LM sequence")
             updated_attention_mask = attention_mask.index_select(
@@ -665,7 +719,7 @@ def forward_multimodal_hidden_state(
 
             position_ids = module_kwargs.get("position_ids")
             if not isinstance(position_ids, torch.Tensor):
-                raise TypeError("DivPrune requires Qwen multimodal position_ids")
+                raise TypeError(f"{pruning_name} requires Qwen multimodal position_ids")
             if position_ids.shape[-1] != inputs_embeds.shape[1]:
                 raise ValueError("Position ID length does not match the unpruned LM sequence")
             updated_kwargs["position_ids"] = position_ids.index_select(
@@ -781,9 +835,9 @@ def forward_multimodal_hidden_state(
             "Utterance-token ablation expected one language-model call, "
             f"observed {utterance_hook_calls}"
         )
-    if visual_token_pruning == "divprune" and pruning_hook_calls != 1:
+    if visual_token_pruning != "none" and pruning_hook_calls != 1:
         raise RuntimeError(
-            "DivPrune expected one language-model call, "
+            f"{visual_token_pruning} pruning expected one language-model call, "
             f"observed {pruning_hook_calls}"
         )
     return hidden, effective_attention_mask, retained_visual_token_count
@@ -807,6 +861,8 @@ def extract_shared_embedding(
     utterance_token_ablation: str,
     visual_token_pruning: str,
     divprune_retain_ratio: float,
+    random_prune_retain_ratio: float,
+    random_prune_sample_seed: int,
     frame_selector: FrameDiversitySelector | None,
     frame_retain_ratio: float,
 ) -> tuple[torch.Tensor, int, int, int, dict[str, Any]]:
@@ -923,6 +979,8 @@ def extract_shared_embedding(
                 utterance_token_mask,
                 visual_token_pruning,
                 divprune_retain_ratio,
+                random_prune_retain_ratio,
+                random_prune_sample_seed,
             )
 
         embedding = pool_hidden_states(
@@ -965,6 +1023,8 @@ def main() -> None:
         raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if not 0.0 < args.random_prune_retain_ratio <= 1.0:
+        raise ValueError("--random-prune-retain-ratio must be in the interval (0, 1]")
     if args.frame_selection != "none" and args.modality_mode == "text_only":
         raise ValueError("Frame selection requires a modality mode that includes video")
     if not 0.0 < args.frame_retain_ratio <= 1.0:
@@ -1003,7 +1063,9 @@ def main() -> None:
     print(f"Utterance-token ablation: {args.utterance_token_ablation}")
     print(
         f"Visual-token pruning: {args.visual_token_pruning}; "
-        f"DivPrune retain ratio={args.divprune_retain_ratio}"
+        f"DivPrune retain ratio={args.divprune_retain_ratio}; "
+        f"random retain ratio={args.random_prune_retain_ratio}; "
+        f"random seed={args.random_prune_seed}"
     )
     print(f"Layer: {args.layer}; pooling: {args.pooling}")
     print(f"Prompt style: {args.prompt_style}; add_generation_prompt={not args.no_generation_prompt}")
@@ -1050,6 +1112,8 @@ def main() -> None:
             utterance_token_ablation=args.utterance_token_ablation,
             visual_token_pruning=args.visual_token_pruning,
             divprune_retain_ratio=args.divprune_retain_ratio,
+            random_prune_retain_ratio=args.random_prune_retain_ratio,
+            random_prune_seed=args.random_prune_seed,
             frame_selection=args.frame_selection,
             frame_retain_ratio=args.frame_retain_ratio,
             frame_encoder_model=args.frame_encoder_model,
@@ -1068,6 +1132,7 @@ def main() -> None:
         video_path = str(row["video_path"])
         utterance = str(row["utterance"])
         sample_id = str(row["sample_id"])
+        random_prune_sample_seed = sample_seed(args.random_prune_seed, sample_id)
 
         if sample_id in done_ids:
             continue
@@ -1101,6 +1166,8 @@ def main() -> None:
                 utterance_token_ablation=args.utterance_token_ablation,
                 visual_token_pruning=args.visual_token_pruning,
                 divprune_retain_ratio=args.divprune_retain_ratio,
+                random_prune_retain_ratio=args.random_prune_retain_ratio,
+                random_prune_sample_seed=random_prune_sample_seed,
                 frame_selector=frame_selector,
                 frame_retain_ratio=args.frame_retain_ratio,
             )
@@ -1132,7 +1199,14 @@ def main() -> None:
             )
             row_metadata["visual_token_pruning"] = args.visual_token_pruning
             row_metadata["visual_token_pruning_implementation"] = (
-                DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+                DIVPRUNE_IMPLEMENTATION
+                if args.visual_token_pruning == "divprune"
+                else RANDOM_PRUNE_IMPLEMENTATION
+                if args.visual_token_pruning == "random"
+                else "none"
+            )
+            row_metadata["random_prune_sample_seed"] = (
+                random_prune_sample_seed if args.visual_token_pruning == "random" else None
             )
             row_metadata["divprune_reference_commit"] = (
                 DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
@@ -1177,6 +1251,7 @@ def main() -> None:
                         + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                         + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                         + ("_divprune" if args.visual_token_pruning == "divprune" else "")
+                        + ("_random_prune" if args.visual_token_pruning == "random" else "")
                         + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
                     ),
                     "visual_ablation_implementation": (
@@ -1188,7 +1263,11 @@ def main() -> None:
                         else "none"
                     ),
                     "visual_token_pruning_implementation": (
-                        DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+                        DIVPRUNE_IMPLEMENTATION
+                        if args.visual_token_pruning == "divprune"
+                        else RANDOM_PRUNE_IMPLEMENTATION
+                        if args.visual_token_pruning == "random"
+                        else "none"
                     ),
                     "divprune_reference_commit": (
                         DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None
@@ -1223,6 +1302,7 @@ def main() -> None:
                 + ("_zero_visual_tokens" if args.visual_token_ablation == "zero" else "")
                 + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                 + ("_divprune" if args.visual_token_pruning == "divprune" else "")
+                + ("_random_prune" if args.visual_token_pruning == "random" else "")
                 + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
             ),
             "visual_ablation_implementation": (
@@ -1234,7 +1314,11 @@ def main() -> None:
                 else "none"
             ),
             "visual_token_pruning_implementation": (
-                DIVPRUNE_IMPLEMENTATION if args.visual_token_pruning == "divprune" else "none"
+                DIVPRUNE_IMPLEMENTATION
+                if args.visual_token_pruning == "divprune"
+                else RANDOM_PRUNE_IMPLEMENTATION
+                if args.visual_token_pruning == "random"
+                else "none"
             ),
             "divprune_reference_commit": (
                 DIVPRUNE_REFERENCE_COMMIT if args.visual_token_pruning == "divprune" else None

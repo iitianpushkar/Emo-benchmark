@@ -271,6 +271,30 @@ Pruning and zero visual-token ablation are intentionally mutually exclusive.
 Resume and seed checks reject files created with another pruning method or
 retention ratio.
 
+## Random visual-token pruning control
+
+Use seeded uniform random pruning as a control for DivPrune at the same
+projected-visual-token retention ratio:
+
+```bash
+python scripts/run_qwen_shared_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/qwen2_5_vl_3b_random_prune_030_seed42_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --visual-token-pruning random \
+  --random-prune-retain-ratio 0.30 \
+  --random-prune-seed 42 \
+  --save-dtype float32
+```
+
+The base seed and `sample_id` determine a stable per-sample seed, so token
+selection is unchanged by chunk size, processing order, or resume behavior.
+Sampled visual-token indices are restored to their original sequence order;
+all text and special tokens are retained. Metadata records the implementation,
+base seed, derived sample seed, and actual retained-token ratio. Resume and
+seed checks reject random-pruning outputs created with another ratio or seed.
+
 ## Zero visual-token ablation
 
 To measure the effect of Qwen's visual features while keeping the multimodal prompt and sequence layout fixed, extract a matched embedding set with the projected visual tokens replaced by zero immediately before they enter the language model:

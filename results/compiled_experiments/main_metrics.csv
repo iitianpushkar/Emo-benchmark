@@ -1,0 +1,19 @@
+experiment,method,split,accuracy,macro_f1,weighted_f1,support,selection_basis,classifier,parameter_name,parameter_value
+shared_baseline,Full video and utterance,dev,0.610708,0.487172,0.613229,1102,none,baseline_mlp,,
+shared_baseline,Full video and utterance,test,0.588303,0.433647,0.594768,2599,none,baseline_mlp,,
+visual_ablation,Zero visual contribution,dev,0.323049,0.123024,0.260827,1102,direct_zero,baseline_mlp,visual_available,0
+visual_ablation,Zero visual contribution,test,0.385918,0.139427,0.326907,2599,direct_zero,baseline_mlp,visual_available,0
+utterance_ablation,Zero utterance contribution,dev,0.320327,0.181012,0.298079,1102,direct_zero,baseline_mlp,utterance_available,0
+utterance_ablation,Zero utterance contribution,test,0.358215,0.176804,0.343729,2599,direct_zero,baseline_mlp,utterance_available,0
+divprune,DivPrune 0.30 + previous MLP,dev,0.585299,0.439766,0.576691,1102,projected_visual_token_diversity,baseline_mlp,token_retain_ratio,0.30
+divprune,DivPrune 0.30 + previous MLP,test,0.595229,0.410458,0.591309,2599,projected_visual_token_diversity,baseline_mlp,token_retain_ratio,0.30
+divprune,DivPrune 0.30 + new MLP,dev,0.590744,0.464805,0.591524,1102,projected_visual_token_diversity,retrained_mlp,token_retain_ratio,0.30
+divprune,DivPrune 0.30 + new MLP,test,0.608696,0.454092,0.612673,2599,projected_visual_token_diversity,retrained_mlp,token_retain_ratio,0.30
+divprune,DivPrune 0.70 + previous MLP,dev,0.603448,0.467841,0.602671,1102,projected_visual_token_diversity,baseline_mlp,token_retain_ratio,0.70
+divprune,DivPrune 0.70 + previous MLP,test,0.583686,0.411931,0.588322,2599,projected_visual_token_diversity,baseline_mlp,token_retain_ratio,0.70
+divprune,DivPrune 0.70 + new MLP,dev,0.603448,0.483914,0.606517,1102,projected_visual_token_diversity,retrained_mlp,token_retain_ratio,0.70
+divprune,DivPrune 0.70 + new MLP,test,0.579454,0.421665,0.585849,2599,projected_visual_token_diversity,retrained_mlp,token_retain_ratio,0.70
+frame_pruning,DINOv2-base diverse 0.20 + previous MLP,dev,0.597109,0.460915,0.595692,1107,dinov2_frame_diversity,baseline_mlp,frame_retain_ratio,0.20
+frame_pruning,DINOv2-base diverse 0.20 + previous MLP,test,0.591414,0.427540,0.595377,2609,dinov2_frame_diversity,baseline_mlp,frame_retain_ratio,0.20
+frame_pruning,DINOv2-base diverse 0.20 + new MLP,dev,0.608853,0.465655,0.608236,1107,dinov2_frame_diversity,retrained_mlp,frame_retain_ratio,0.20
+frame_pruning,DINOv2-base diverse 0.20 + new MLP,test,0.599847,0.441688,0.602413,2609,dinov2_frame_diversity,retrained_mlp,frame_retain_ratio,0.20

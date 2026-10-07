@@ -1,0 +1,2 @@
+dataset,num_pairs,num_evaluated,num_dropped,utterance_follow_rate,video_follow_rate,other_prediction_rate,utterance_preference_rate,mean_utterance_probability,mean_video_probability,mean_utterance_minus_video_log_probability
+MELD_dev_cross_class_conflicts,6648,6574,74,0.543048,0.099026,0.357925,0.808488,0.480051,0.106277,3.843194
