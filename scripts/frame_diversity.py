@@ -7,12 +7,29 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
 
 DEFAULT_RETAIN_RATIO = 0.20
 DEFAULT_ENCODER_MODEL = "facebook/dinov2-base"
 IMPLEMENTATION_NAME = "centroid_seeded_frame_max_min_cosine"
+RANDOM_IMPLEMENTATION_NAME = "sample_id_seeded_uniform_random_frames"
+DEFAULT_RANDOM_SEED = 42
+
+
+def embedding_suffix(
+    frame_selection: str,
+    retain_ratio: float,
+    random_seed: int = DEFAULT_RANDOM_SEED,
+) -> str:
+    """Return a stable output suffix that records the configured percentage."""
+    if frame_selection == "none":
+        return ""
+    ratio_code = int(round(retain_ratio * 100))
+    if frame_selection == "diverse":
+        return f"_diverse_frames_{ratio_code:03d}"
+    if frame_selection == "random":
+        return f"_random_frames_{ratio_code:03d}_seed{random_seed}"
+    raise ValueError(f"Unknown frame selection mode: {frame_selection}")
 
 
 def retained_frame_count(num_frames: int, retain_ratio: float = DEFAULT_RETAIN_RATIO) -> int:
@@ -64,8 +81,25 @@ def select_diverse_frame_indices(
     return torch.nonzero(selected, as_tuple=False).squeeze(1).sort().values.long()
 
 
-def frame_tensor_to_pil(frame: torch.Tensor) -> Image.Image:
+def select_random_frame_indices(
+    num_frames: int,
+    retain_ratio: float = DEFAULT_RETAIN_RATIO,
+    seed: int = DEFAULT_RANDOM_SEED,
+) -> torch.Tensor:
+    """Select a deterministic uniform random subset in temporal order."""
+    target_count = retained_frame_count(num_frames, retain_ratio)
+    if target_count == num_frames:
+        return torch.arange(num_frames, dtype=torch.long)
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return torch.randperm(num_frames, generator=generator)[:target_count].sort().values
+
+
+def frame_tensor_to_pil(frame: torch.Tensor) -> Any:
     """Convert one CHW RGB frame to PIL without assuming its numeric range."""
+    from PIL import Image
+
     if frame.ndim != 3 or frame.shape[0] not in {1, 3, 4}:
         raise ValueError(f"Expected a CHW frame, got {tuple(frame.shape)}")
     pixels = frame.detach().cpu()

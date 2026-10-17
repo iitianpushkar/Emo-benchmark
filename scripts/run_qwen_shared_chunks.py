@@ -21,8 +21,10 @@ import torch
 from divprune import DEFAULT_RETAIN_RATIO, IMPLEMENTATION_NAME as DIVPRUNE_IMPLEMENTATION
 from frame_diversity import (
     DEFAULT_ENCODER_MODEL as DEFAULT_FRAME_ENCODER_MODEL,
+    DEFAULT_RANDOM_SEED as DEFAULT_FRAME_RANDOM_SEED,
     DEFAULT_RETAIN_RATIO as DEFAULT_FRAME_RETAIN_RATIO,
     IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
+    RANDOM_IMPLEMENTATION_NAME as RANDOM_FRAME_SELECTION_IMPLEMENTATION,
 )
 from random_prune import (
     DEFAULT_RETAIN_RATIO as DEFAULT_RANDOM_RETAIN_RATIO,
@@ -54,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-size", type=int, default=224, help="Square resize size for video frames.")
     parser.add_argument(
         "--frame-selection",
-        choices=["none", "diverse"],
+        choices=["none", "diverse", "random"],
         default="none",
         help="Decoded-frame selection forwarded to extract_qwen_shared_embeddings.py.",
     )
@@ -62,7 +64,13 @@ def parse_args() -> argparse.Namespace:
         "--frame-retain-ratio",
         type=float,
         default=DEFAULT_FRAME_RETAIN_RATIO,
-        help="Fraction of candidate frames retained by diverse selection (default: 0.20).",
+        help="Fraction of candidate frames retained by frame selection (default: 0.20).",
+    )
+    parser.add_argument(
+        "--frame-random-seed",
+        type=int,
+        default=DEFAULT_FRAME_RANDOM_SEED,
+        help="Base seed for deterministic per-sample random frame selection.",
     )
     parser.add_argument(
         "--frame-encoder-model",
@@ -264,7 +272,7 @@ def payload_frame_selection_value(payload: dict[str, Any], key: str) -> Any:
         item.get("config", {}).get(key)
         for item in config.get("merged_from", [])
         if isinstance(item, dict)
-        and item.get("config", {}).get("frame_selection", "none") == "diverse"
+        and item.get("config", {}).get("frame_selection", "none") != "none"
     }
     nested_values.discard(None)
     if len(nested_values) > 1:
@@ -276,6 +284,7 @@ def validate_frame_selection_config(
     payload: dict[str, Any],
     expected_selection: str,
     expected_retain_ratio: float,
+    expected_random_seed: int,
     expected_encoder_model: str,
     context: str,
 ) -> None:
@@ -284,7 +293,7 @@ def validate_frame_selection_config(
         raise ValueError(
             f"{context} has frame_selection={saved_selection!r}, expected {expected_selection!r}"
         )
-    if expected_selection != "diverse":
+    if expected_selection == "none":
         return
 
     saved_ratio = payload_frame_selection_value(payload, "frame_retain_ratio")
@@ -292,19 +301,30 @@ def validate_frame_selection_config(
         raise ValueError(
             f"{context} has frame_retain_ratio={saved_ratio}, expected {expected_retain_ratio}"
         )
-    saved_model = payload_frame_selection_value(payload, "frame_encoder_model")
-    if saved_model != expected_encoder_model:
-        raise ValueError(
-            f"{context} has frame_encoder_model={saved_model!r}, expected {expected_encoder_model!r}"
-        )
     saved_implementation = payload_frame_selection_value(
         payload,
         "frame_selection_implementation",
     )
-    if saved_implementation != FRAME_SELECTION_IMPLEMENTATION:
+    if expected_selection == "diverse":
+        saved_model = payload_frame_selection_value(payload, "frame_encoder_model")
+        if saved_model != expected_encoder_model:
+            raise ValueError(
+                f"{context} has frame_encoder_model={saved_model!r}, expected {expected_encoder_model!r}"
+            )
+        expected_implementation = FRAME_SELECTION_IMPLEMENTATION
+    elif expected_selection == "random":
+        saved_seed = payload_frame_selection_value(payload, "frame_random_seed")
+        if saved_seed is None or int(saved_seed) != expected_random_seed:
+            raise ValueError(
+                f"{context} has frame_random_seed={saved_seed}, expected {expected_random_seed}"
+            )
+        expected_implementation = RANDOM_FRAME_SELECTION_IMPLEMENTATION
+    else:
+        raise ValueError(f"Unknown frame selection mode: {expected_selection}")
+    if saved_implementation != expected_implementation:
         raise ValueError(
             f"{context} has frame_selection_implementation={saved_implementation!r}, "
-            f"expected {FRAME_SELECTION_IMPLEMENTATION!r}"
+            f"expected {expected_implementation!r}"
         )
 
 
@@ -376,6 +396,7 @@ def existing_chunk_count(
     expected_random_seed: int,
     expected_frame_selection: str,
     expected_frame_retain_ratio: float,
+    expected_frame_random_seed: int,
     expected_frame_encoder_model: str,
 ) -> int | None:
     if not path.exists():
@@ -420,6 +441,7 @@ def existing_chunk_count(
             payload,
             expected_frame_selection,
             expected_frame_retain_ratio,
+            expected_frame_random_seed,
             expected_frame_encoder_model,
             f"Existing chunk {path}",
         )
@@ -453,6 +475,7 @@ def seed_chunks_from_existing_pt(
     random_prune_seed: int,
     frame_selection: str,
     frame_retain_ratio: float,
+    frame_random_seed: int,
     frame_encoder_model: str,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
@@ -501,6 +524,7 @@ def seed_chunks_from_existing_pt(
         payload,
         frame_selection,
         frame_retain_ratio,
+        frame_random_seed,
         frame_encoder_model,
         f"Seed payload {seed_pt}",
     )
@@ -604,9 +628,12 @@ def seed_chunks_from_existing_pt(
                 ),
                 "frame_selection": frame_selection,
                 "frame_retain_ratio": frame_retain_ratio,
+                "frame_random_seed": frame_random_seed,
                 "frame_encoder_model": frame_encoder_model,
                 "frame_selection_implementation": (
                     FRAME_SELECTION_IMPLEMENTATION if frame_selection == "diverse" else "none"
+                    if frame_selection == "none"
+                    else RANDOM_FRAME_SELECTION_IMPLEMENTATION
                 ),
             },
         }
@@ -674,6 +701,7 @@ def main() -> None:
             random_prune_seed=args.random_prune_seed,
             frame_selection=args.frame_selection,
             frame_retain_ratio=args.frame_retain_ratio,
+            frame_random_seed=args.frame_random_seed,
             frame_encoder_model=args.frame_encoder_model,
         )
 
@@ -693,6 +721,7 @@ def main() -> None:
                 args.random_prune_seed,
                 args.frame_selection,
                 args.frame_retain_ratio,
+                args.frame_random_seed,
                 args.frame_encoder_model,
             )
             if count is not None and count >= current_limit:
@@ -724,6 +753,8 @@ def main() -> None:
             args.frame_selection,
             "--frame-retain-ratio",
             str(args.frame_retain_ratio),
+            "--frame-random-seed",
+            str(args.frame_random_seed),
             "--frame-encoder-model",
             args.frame_encoder_model,
             "--frame-encoder-device",

@@ -227,6 +227,33 @@ python scripts/run_qwen_shared_chunks.py \
 Resume, seed, and completed-chunk checks reject outputs produced with a
 different frame-selection mode, retention ratio, encoder, or implementation.
 
+## Random-frame control at 20% retention
+
+Use the same candidate-frame decoding and retention count as the DINOv2
+experiment, but sample frames uniformly at random before Qwen:
+
+```bash
+python scripts/run_qwen_shared_chunks.py \
+  --index-csv outputs/indexes/meld_train_index.csv \
+  --chunks-dir embeddings/qwen2_5_vl_3b_random_frames_020_seed42_chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-selection random \
+  --frame-retain-ratio 0.20 \
+  --frame-random-seed 42 \
+  --save-dtype float32 \
+  --skip-existing-complete
+```
+
+The base seed and `sample_id` deterministically produce a different random
+subset for each sample, independent of chunk order or parallel execution.
+Selected indices are sorted back into chronological order before Qwen. Random
+frame selection does not load or run DINOv2. Repeat the command for train,
+dev, and test with the corresponding index, chunk directory, and prefix.
+
 ## DivPrune visual-token extraction
 
 To apply the [official DivPrune](https://github.com/vbdi/divprune) max-min

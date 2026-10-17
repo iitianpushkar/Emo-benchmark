@@ -38,9 +38,13 @@ from divprune import (
 )
 from frame_diversity import (
     DEFAULT_ENCODER_MODEL as DEFAULT_FRAME_ENCODER_MODEL,
+    DEFAULT_RANDOM_SEED as DEFAULT_FRAME_RANDOM_SEED,
     DEFAULT_RETAIN_RATIO as DEFAULT_FRAME_RETAIN_RATIO,
     IMPLEMENTATION_NAME as FRAME_SELECTION_IMPLEMENTATION,
+    RANDOM_IMPLEMENTATION_NAME as RANDOM_FRAME_SELECTION_IMPLEMENTATION,
     FrameDiversitySelector,
+    embedding_suffix as frame_selection_embedding_suffix,
+    select_random_frame_indices,
 )
 from random_prune import (
     DEFAULT_RETAIN_RATIO as DEFAULT_RANDOM_RETAIN_RATIO,
@@ -66,15 +70,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-size", type=int, default=224, help="Square resize size for video frames.")
     parser.add_argument(
         "--frame-selection",
-        choices=["none", "diverse"],
+        choices=["none", "diverse", "random"],
         default="none",
-        help="Optionally retain a cosine-diverse subset of decoded frames before Qwen processing.",
+        help="Optionally retain a diverse or seeded random subset of decoded frames before Qwen processing.",
     )
     parser.add_argument(
         "--frame-retain-ratio",
         type=float,
         default=DEFAULT_FRAME_RETAIN_RATIO,
-        help="Fraction of decoded candidate frames retained by diverse frame selection (default: 0.20).",
+        help="Fraction of decoded candidate frames retained by frame selection (default: 0.20).",
+    )
+    parser.add_argument(
+        "--frame-random-seed",
+        type=int,
+        default=DEFAULT_FRAME_RANDOM_SEED,
+        help="Base seed for deterministic per-sample random frame selection.",
     )
     parser.add_argument(
         "--frame-encoder-model",
@@ -329,6 +339,7 @@ def load_resume_payload(
     random_prune_seed: int,
     frame_selection: str,
     frame_retain_ratio: float,
+    frame_random_seed: int,
     frame_encoder_model: str,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
@@ -382,13 +393,14 @@ def load_resume_payload(
             f"Cannot resume from {path}; frame_selection={saved_frame_selection!r}, "
             f"expected {frame_selection!r}"
         )
-    if frame_selection == "diverse":
+    if frame_selection in {"diverse", "random"}:
         saved_ratio = float(saved_config.get("frame_retain_ratio", -1.0))
         if abs(saved_ratio - frame_retain_ratio) > 1e-12:
             raise ValueError(
                 f"Cannot resume from {path}; frame_retain_ratio={saved_ratio}, "
                 f"expected {frame_retain_ratio}"
             )
+    if frame_selection == "diverse":
         saved_model = saved_config.get("frame_encoder_model")
         if saved_model != frame_encoder_model:
             raise ValueError(
@@ -400,6 +412,19 @@ def load_resume_payload(
             raise ValueError(
                 f"Cannot resume from {path}; frame_selection_implementation="
                 f"{saved_implementation!r}, expected {FRAME_SELECTION_IMPLEMENTATION!r}"
+            )
+    if frame_selection == "random":
+        saved_seed = int(saved_config.get("frame_random_seed", -1))
+        if saved_seed != frame_random_seed:
+            raise ValueError(
+                f"Cannot resume from {path}; frame_random_seed={saved_seed}, "
+                f"expected {frame_random_seed}"
+            )
+        saved_implementation = saved_config.get("frame_selection_implementation")
+        if saved_implementation != RANDOM_FRAME_SELECTION_IMPLEMENTATION:
+            raise ValueError(
+                f"Cannot resume from {path}; frame_selection_implementation="
+                f"{saved_implementation!r}, expected {RANDOM_FRAME_SELECTION_IMPLEMENTATION!r}"
             )
     if visual_token_pruning == "divprune":
         saved_ratio = float(saved_config.get("divprune_retain_ratio", -1.0))
@@ -863,8 +888,10 @@ def extract_shared_embedding(
     divprune_retain_ratio: float,
     random_prune_retain_ratio: float,
     random_prune_sample_seed: int,
+    frame_selection: str,
     frame_selector: FrameDiversitySelector | None,
     frame_retain_ratio: float,
+    frame_random_sample_seed: int,
 ) -> tuple[torch.Tensor, int, int, int, dict[str, Any]]:
     prompt = make_prompt(utterance, prompt_style, modality_mode)
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
@@ -880,23 +907,39 @@ def extract_shared_embedding(
         "frame_selection_seconds": None,
         "candidate_sampling_fps": None,
         "qwen_input_fps": None,
+        "frame_random_sample_seed": None,
     }
-    if frame_selector is not None:
+    if frame_selection != "none":
         if not video_inputs or len(video_inputs) != 1:
             raise ValueError(
-                "Diverse frame selection expects exactly one decoded video per sample"
+                "Frame selection expects exactly one decoded video per sample"
             )
         candidate_frames = video_inputs[0]
         if not isinstance(candidate_frames, torch.Tensor) or candidate_frames.ndim != 4:
             raise ValueError(
-                "Diverse frame selection expected a decoded TCHW video tensor, "
+                "Frame selection expected a decoded TCHW video tensor, "
                 f"got {type(candidate_frames).__name__}"
             )
         selection_start = time.perf_counter()
-        selected_frames, selected_indices = frame_selector.select(
-            candidate_frames,
-            retain_ratio=frame_retain_ratio,
-        )
+        if frame_selection == "diverse":
+            if frame_selector is None:
+                raise RuntimeError("Diverse frame selection requires a frame encoder")
+            selected_frames, selected_indices = frame_selector.select(
+                candidate_frames,
+                retain_ratio=frame_retain_ratio,
+            )
+        elif frame_selection == "random":
+            selected_indices = select_random_frame_indices(
+                int(candidate_frames.shape[0]),
+                retain_ratio=frame_retain_ratio,
+                seed=frame_random_sample_seed,
+            )
+            selected_frames = candidate_frames.index_select(
+                0,
+                selected_indices.to(candidate_frames.device),
+            )
+        else:
+            raise ValueError(f"Unknown frame selection mode: {frame_selection}")
         selection_seconds = time.perf_counter() - selection_start
         candidate_count = int(candidate_frames.shape[0])
         retained_count = int(selected_frames.shape[0])
@@ -919,6 +962,9 @@ def extract_shared_embedding(
             "frame_selection_seconds": selection_seconds,
             "candidate_sampling_fps": candidate_sampling_fps,
             "qwen_input_fps": video_kwargs.get("fps"),
+            "frame_random_sample_seed": (
+                frame_random_sample_seed if frame_selection == "random" else None
+            ),
         }
 
     processor_inputs: dict[str, Any] = {
@@ -1012,6 +1058,11 @@ def save_payload(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> None:
     args = parse_args()
+    frame_embedding_suffix = frame_selection_embedding_suffix(
+        args.frame_selection,
+        args.frame_retain_ratio,
+        args.frame_random_seed,
+    )
 
     if args.visual_token_ablation != "none" and args.modality_mode == "text_only":
         raise ValueError("Visual-token ablation requires a modality mode that includes video")
@@ -1055,9 +1106,16 @@ def main() -> None:
     print(f"Rows to process: {len(df)}")
     print(f"Model: {args.model_id}")
     print(f"Embedding type: shared LM hidden states; modality_mode={args.modality_mode}")
+    frame_selector_detail = (
+        f"encoder={args.frame_encoder_model}"
+        if args.frame_selection == "diverse"
+        else f"seed={args.frame_random_seed}"
+        if args.frame_selection == "random"
+        else "disabled"
+    )
     print(
         f"Frame selection: {args.frame_selection}; retain ratio={args.frame_retain_ratio}; "
-        f"encoder={args.frame_encoder_model}"
+        f"{frame_selector_detail}"
     )
     print(f"Visual-token ablation: {args.visual_token_ablation}")
     print(f"Utterance-token ablation: {args.utterance_token_ablation}")
@@ -1116,6 +1174,7 @@ def main() -> None:
             random_prune_seed=args.random_prune_seed,
             frame_selection=args.frame_selection,
             frame_retain_ratio=args.frame_retain_ratio,
+            frame_random_seed=args.frame_random_seed,
             frame_encoder_model=args.frame_encoder_model,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
@@ -1133,6 +1192,7 @@ def main() -> None:
         utterance = str(row["utterance"])
         sample_id = str(row["sample_id"])
         random_prune_sample_seed = sample_seed(args.random_prune_seed, sample_id)
+        frame_random_sample_seed = sample_seed(args.frame_random_seed, sample_id)
 
         if sample_id in done_ids:
             continue
@@ -1168,8 +1228,10 @@ def main() -> None:
                 divprune_retain_ratio=args.divprune_retain_ratio,
                 random_prune_retain_ratio=args.random_prune_retain_ratio,
                 random_prune_sample_seed=random_prune_sample_seed,
+                frame_selection=args.frame_selection,
                 frame_selector=frame_selector,
                 frame_retain_ratio=args.frame_retain_ratio,
+                frame_random_sample_seed=frame_random_sample_seed,
             )
             if not torch.isfinite(embedding).all():
                 raise ValueError("Extracted embedding contains NaN or Inf values")
@@ -1216,6 +1278,8 @@ def main() -> None:
             row_metadata["frame_selection"] = args.frame_selection
             row_metadata["frame_selection_implementation"] = (
                 FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
+                if args.frame_selection == "none"
+                else RANDOM_FRAME_SELECTION_IMPLEMENTATION
             )
             row_metadata["frame_encoder_model"] = (
                 args.frame_encoder_model if args.frame_selection == "diverse" else None
@@ -1252,7 +1316,7 @@ def main() -> None:
                         + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                         + ("_divprune" if args.visual_token_pruning == "divprune" else "")
                         + ("_random_prune" if args.visual_token_pruning == "random" else "")
-                        + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
+                        + frame_embedding_suffix
                     ),
                     "visual_ablation_implementation": (
                         DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -1274,6 +1338,8 @@ def main() -> None:
                     ),
                     "frame_selection_implementation": (
                         FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
+                        if args.frame_selection == "none"
+                        else RANDOM_FRAME_SELECTION_IMPLEMENTATION
                     ),
                     "include_video": include_video,
                     "include_utterance": include_utterance,
@@ -1303,7 +1369,7 @@ def main() -> None:
                 + ("_zero_utterance_tokens" if args.utterance_token_ablation == "zero" else "")
                 + ("_divprune" if args.visual_token_pruning == "divprune" else "")
                 + ("_random_prune" if args.visual_token_pruning == "random" else "")
-                + ("_diverse_frames_020" if args.frame_selection == "diverse" else "")
+                + frame_embedding_suffix
             ),
             "visual_ablation_implementation": (
                 DIRECT_ZERO_IMPLEMENTATION if args.visual_token_ablation == "zero" else "none"
@@ -1325,6 +1391,8 @@ def main() -> None:
             ),
             "frame_selection_implementation": (
                 FRAME_SELECTION_IMPLEMENTATION if args.frame_selection == "diverse" else "none"
+                if args.frame_selection == "none"
+                else RANDOM_FRAME_SELECTION_IMPLEMENTATION
             ),
             "include_video": include_video,
             "include_utterance": include_utterance,
