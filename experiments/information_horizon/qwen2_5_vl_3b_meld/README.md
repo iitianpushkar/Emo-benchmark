@@ -4,7 +4,7 @@
 
 Attach the updated `benchmark-code` and `meld-dataset` inputs, enable a Kaggle
 GPU and Internet, then run every cell in order. The notebook automatically scores
-the first 5 available **dev** samples, every projected visual token, and every decoder
+the first 2 available **dev** samples, every projected visual token, and every decoder
 depth with the saved full-baseline emotion MLP. No pilot setting or run switch is
 needed. It saves one JSON file per completed sample, then exports token scores,
 summary tables, and plots. `--score-only` keeps token outputs compact while

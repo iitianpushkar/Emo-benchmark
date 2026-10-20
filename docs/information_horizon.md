@@ -32,7 +32,7 @@ CSVs are reference checks, not substitutes for the depth-specific absent branch.
 
 ## Kaggle notebook
 
-Use the [MELD Information Horizon notebook](../experiments/information_horizon/qwen2_5_vl_3b_meld/notebooks/information_horizon_meld.ipynb) for Kaggle setup, automatic scoring of the first 5 dev samples at every visual token and decoder depth, per-sample resume, plots, and downloads.
+Use the [MELD Information Horizon notebook](../experiments/information_horizon/qwen2_5_vl_3b_meld/notebooks/information_horizon_meld.ipynb) for Kaggle setup, automatic scoring of the first 2 dev samples at every visual token and decoder depth, per-sample resume, plots, and downloads.
 
 ## Run a pilot
 

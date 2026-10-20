@@ -16,7 +16,7 @@ Browse by research question. Each run keeps its notebooks, configuration, and av
 
 | Run | Available contents |
 |---|---|
-| [qwen2_5_vl_3b_meld](information_horizon/qwen2_5_vl_3b_meld/README.md) | notebook (first 5 dev samples, all visual tokens and depths; results not yet run) |
+| [qwen2_5_vl_3b_meld](information_horizon/qwen2_5_vl_3b_meld/README.md) | notebook (first 2 dev samples, all visual tokens and depths; results not yet run) |
 | [qwen2_5_vl_3b_shared](baselines/qwen2_5_vl_3b_shared/README.md) | chunks, embeddings, outputs, results |
 | [qwen2_5_vl_3b_visual_only](baselines/qwen2_5_vl_3b_visual_only/README.md) | config.yaml |
 | [tdv_dino_ibot](baselines/tdv_dino_ibot/README.md) | notebooks |
