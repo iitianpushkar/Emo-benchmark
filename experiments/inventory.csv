@@ -11,4 +11,4 @@ modality_ablation,alpha_1_divprune_030_mlp,experiments/modality_ablation/alpha_1
 modality_ablation,video_only_divprune_030,experiments/modality_ablation/video_only_divprune_030,PROTOCOL.md;notebooks,Protocol and runnable notebook for video-only DivPrune with two fixed MLPs.
 conflicts,meld_conflict_dataset,experiments/conflicts/meld_conflict_dataset,data,"Prepared conflict matrices, same-class controls and workbook."
 conflicts,qwen2_5_vl_3b_conflict_dev,experiments/conflicts/qwen2_5_vl_3b_conflict_dev,embeddings;outputs,"Development conflict experiment: paired index, embeddings, and evaluation outputs."
-information_horizon,qwen2_5_vl_3b_meld,experiments/information_horizon/qwen2_5_vl_3b_meld,notebooks,Kaggle notebook for token information scoring with fixed-MLP or LM readout; no scored artifacts yet.
+information_horizon,qwen2_5_vl_3b_meld,experiments/information_horizon/qwen2_5_vl_3b_meld,notebooks,Kaggle notebook for automatic exhaustive dev token scoring with the fixed baseline MLP; no scored artifacts yet.

@@ -32,7 +32,7 @@ CSVs are reference checks, not substitutes for the depth-specific absent branch.
 
 ## Kaggle notebook
 
-Use the [MELD Information Horizon notebook](../experiments/information_horizon/qwen2_5_vl_3b_meld/notebooks/information_horizon_meld.ipynb) for Kaggle setup, pilot scoring, an optional exhaustive sweep, resume, plots, and downloads.
+Use the [MELD Information Horizon notebook](../experiments/information_horizon/qwen2_5_vl_3b_meld/notebooks/information_horizon_meld.ipynb) for Kaggle setup, automatic exhaustive dev scoring, per-sample resume, plots, and downloads.
 
 ## Run a pilot
 
@@ -56,10 +56,14 @@ current implementation recomputes vision/prefix features for each intervention;
 it favors a simple reference implementation over speed. A positive max-tokens
 selects evenly spaced ordinals and is a pilot, not exhaustive scoring.
 
+`--score-only` saves only each token's ground-truth score and present probability, reducing storage for exhaustive analysis. The full seven-class per-token arrays remain the default without that flag.
+
 Each completed sample is saved atomically to a JSON file named by a sample-ID
 hash. Files include class order, full probabilities, no-visual probabilities per
-depth, single-token probabilities, signed differences for every class, original
-sequence positions, and signed/absolute mean and variance of ground-truth scores.
+depth, original sequence positions, and signed/absolute mean and variance of
+ground-truth scores. By default each token also has seven-class probabilities and
+signed differences; with `--score-only`, each token has its ground-truth score and
+present probability instead.
 `config.json` records settings, software versions, and checkpoint/index hashes.
 `--resume` requires identical settings and skips completed samples; an interrupted
 sample is recomputed. Invalid/failed samples stop the run rather than disappearing

@@ -33,6 +33,7 @@ def parse_args():
     p.add_argument('--limit', type=int, default=1)
     p.add_argument('--start', type=int, default=0)
     p.add_argument('--max-tokens', type=int, default=0, help='0 scores every token; positive values select evenly spaced token ordinals for a pilot')
+    p.add_argument('--score-only', action='store_true', help='Save the ground-truth information score per token instead of all seven per-token probability vectors')
     p.add_argument('--fps', type=float, default=6)
     p.add_argument('--min-frames', type=int, default=4)
     p.add_argument('--max-frames', type=int, default=64)
@@ -123,6 +124,10 @@ def main():
                     logits = model.lm_head(hidden[:, -1]).float()
                     return logits.softmax(-1)[0, answer_ids].cpu()
                 effective_mask = mask if keep is None else mask.index_select(-1, keep.to(mask.device))
+                # device_map="auto" may put the final decoder block on a different
+                # GPU from input_ids/attention_mask. Boolean indexing needs the
+                # mask on the hidden-state device.
+                effective_mask = effective_mask.to(hidden.device)
                 embedding = pool_hidden_states(hidden, effective_mask, a.pooling).cpu().float().unsqueeze(0)
                 embedding = standardize_with_checkpoint(embedding, checkpoint)
                 return classifier(embedding).softmax(-1)[0]
@@ -136,7 +141,13 @@ def main():
             for token in tokens:
                 present = probability(depth, token)
                 delta = information_scores(present, absent)
-                entries.append(dict(token_ordinal=token, sequence_position=int(positions[token]), probabilities=present.tolist(), probability_differences=delta.tolist(), information_score=float(delta[target])))
+                entry = dict(token_ordinal=token, sequence_position=int(positions[token]), information_score=float(delta[target]))
+                if a.score_only:
+                    entry['present_true_probability'] = float(present[target])
+                else:
+                    entry['probabilities'] = present.tolist()
+                    entry['probability_differences'] = delta.tolist()
+                entries.append(entry)
             scores = torch.tensor([e['information_score'] for e in entries])
             result['depths'].append(dict(depth=depth, absent_probabilities=absent.tolist(), full_minus_absent=(full-absent).tolist(), mean_information=float(scores.mean()), mean_absolute_information=float(scores.abs().mean()), variance_information=float(scores.var(unbiased=False)), tokens=entries))
             print(f'  depth={depth}: mean I={scores.mean():.6g}; mean |I|={scores.abs().mean():.6g}', flush=True)

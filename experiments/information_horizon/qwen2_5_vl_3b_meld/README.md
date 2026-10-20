@@ -2,19 +2,21 @@
 
 [Open the Kaggle notebook](notebooks/information_horizon_meld.ipynb).
 
-Attach the updated `benchmark-code` and `meld-dataset` Kaggle inputs, enable GPU
-and Internet, and run the cells in order. The code input must include the current
-reorganized repository, Information Horizon scripts, and full-baseline checkpoint.
+Attach the updated `benchmark-code` and `meld-dataset` inputs, enable a Kaggle
+GPU and Internet, then run every cell in order. The notebook automatically scores
+every available **dev** sample, every projected visual token, and every decoder
+depth with the saved full-baseline emotion MLP. No pilot setting or run switch is
+needed. It saves one JSON file per completed sample, then exports token scores,
+summary tables, and plots. `--score-only` keeps token outputs compact while
+retaining seven-class probabilities for the full and no-visual branches.
 
-- Default: fixed baseline MLP probabilities, dev split, one-sample pilot.
-- Paper readout: set `READOUT = "lm"` for first-answer-token vocabulary probabilities.
-- Exhaustive scoring: enable `RUN_SWEEP`, with `SWEEP_DEPTHS = "all"` and
-  `SWEEP_TOKENS = 0`. Review the pilot's forward-pass estimate first.
-- Outputs: `/kaggle/working/experiments/information_horizon/<RUN_NAME>/`.
-- Resume: attach previous run output and set `RESTORE_FROM`; retain identical settings.
-- Download: the last cell creates a zip containing results, logs, tables, plots, and provenance.
+The exact experiment is very expensive: each sample requires
+`1 + depths × (visual tokens + 1)` model forward passes. A single Kaggle session
+may not finish. Rerun with the same code, index, checkpoint, and output directory
+to resume; across sessions, restore the saved working directory first. Results
+are under `/kaggle/working/experiments/information_horizon/`.
 
-Transformers is pinned to 4.57.1, matching the decoder-hook integration test.
-This notebook has not been GPU-executed locally; there are no precomputed results
-in this directory. See the [method guide](../../../docs/information_horizon.md)
-for scoring semantics and interpretation limits.
+The notebook checks for the multi-GPU mask fix reported by the first Kaggle run.
+It has been statically validated locally but has not been run to completion on
+Kaggle. See the [method guide](../../../docs/information_horizon.md) for the
+paper score definition and interpretation limits.
