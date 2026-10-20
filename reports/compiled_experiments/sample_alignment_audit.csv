@@ -1,0 +1,29 @@
+experiment,method,family,native_n,unique_ids,overlap_with_baseline,missing_from_baseline,extra_vs_baseline,global_intersection_n
+baseline,Full baseline,main,2599,2599,2599,0,0,2598
+divprune_070,DivPrune 0.70 + new MLP,pruning,2599,2599,2599,0,0,2598
+divprune_070,DivPrune 0.70 + previous MLP,pruning,2599,2599,2599,0,0,2598
+divprune_030,DivPrune 0.30 + new MLP,pruning,2599,2599,2599,0,0,2598
+divprune_030,DivPrune 0.30 + previous MLP,pruning,2599,2599,2599,0,0,2598
+divprune_015,DivPrune 0.15 + new MLP,pruning,2599,2599,2599,0,0,2598
+divprune_015,DivPrune 0.15 + previous MLP,pruning,2599,2599,2599,0,0,2598
+divprune_005,DivPrune 0.05 + new MLP,pruning,2599,2599,2599,0,0,2598
+divprune_005,DivPrune 0.05 + previous MLP,pruning,2599,2599,2599,0,0,2598
+random_030,Random tokens 0.30 + new MLP,pruning,2606,2606,2599,0,7,2598
+random_030,Random tokens 0.30 + previous MLP,pruning,2606,2606,2599,0,7,2598
+random_005,Random tokens 0.05 + new MLP,pruning,2609,2609,2599,0,10,2598
+random_005,Random tokens 0.05 + previous MLP,pruning,2609,2609,2599,0,10,2598
+frame_020,DINOv2 diverse frames 0.20 + new MLP,pruning,2609,2609,2598,1,11,2598
+frame_020,DINOv2 diverse frames 0.20 + previous MLP,pruning,2609,2609,2598,1,11,2598
+visual_ablation,Zero visual contribution,ablation,2599,2599,2599,0,0,2598
+utterance_ablation,Zero utterance contribution,ablation,2599,2599,2599,0,0,2598
+alpha_0_00,Fusion video alpha 0.00,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_10,Fusion video alpha 0.10,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_20,Fusion video alpha 0.20,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_30,Fusion video alpha 0.30,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_40,Fusion video alpha 0.40,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_50,Fusion video alpha 0.50,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_60,Fusion video alpha 0.60,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_70,Fusion video alpha 0.70,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_80,Fusion video alpha 0.80,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_0_90,Fusion video alpha 0.90,alpha_sweep,2599,2599,2599,0,0,2598
+alpha_1_00,Fusion video alpha 1.00,alpha_sweep,2599,2599,2599,0,0,2598

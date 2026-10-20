@@ -6,15 +6,15 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from frame_diversity import (
+from scripts.pruning.frame_diversity import (
     embedding_suffix,
     retained_frame_count,
     select_diverse_frame_indices,
     select_random_frame_indices,
 )
-from random_prune import sample_seed
+from scripts.pruning.random_prune import sample_seed
 
 
 class FrameDiversityTests(unittest.TestCase):

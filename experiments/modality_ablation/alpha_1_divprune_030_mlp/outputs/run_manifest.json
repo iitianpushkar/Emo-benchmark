@@ -1,0 +1,12 @@
+{
+  "source_embeddings_archive": "/Users/pushkarsingh/Downloads/results/alpha_sweep.zip",
+  "source_checkpoint_archive": "/Users/pushkarsingh/Downloads/results/divprune_exp_0.3",
+  "checkpoint_member": "outputs/qwen2_5_vl_3b_divprune_070/new_mlp/best_mlp.pt",
+  "verified_divprune_retain_ratio": 0.3,
+  "alpha_video": 1.0,
+  "normalized_before_fusion": false,
+  "evaluation_normalization": "saved checkpoint feature_mean and feature_std",
+  "device": "cpu",
+  "torch_version": "2.14.1",
+  "note": "Existing alpha-1 embeddings evaluated unchanged; no new visual pruning or MLP training."
+}

@@ -1,0 +1,14 @@
+family,run,path,contents,description
+baselines,qwen2_5_vl_3b_shared,experiments/baselines/qwen2_5_vl_3b_shared,chunks;embeddings;outputs;results,"Full video + utterance Qwen baseline. Contains the trained MLP, per-class predictions, embeddings, extraction chunks, and curated figures."
+baselines,qwen2_5_vl_3b_visual_only,experiments/baselines/qwen2_5_vl_3b_visual_only,config.yaml,Configuration for the original visual-feature baseline; local results are not bundled here.
+baselines,tdv_dino_ibot,experiments/baselines/tdv_dino_ibot,notebooks,"Standalone Kaggle notebook comparing DINO, iBOT, and TDV encoder backbones."
+token_pruning,qwen2_5_vl_3b_divprune_030,experiments/token_pruning/qwen2_5_vl_3b_divprune_030,checkpoints,Reusable 30% DivPrune classifier checkpoint. Other pruning runs remain in external result archives referenced by compiled reports.
+frame_pruning,qwen2_5_vl_3b_dinov2_base_frames_020,experiments/frame_pruning/qwen2_5_vl_3b_dinov2_base_frames_020,embeddings,Embeddings from DINOv2 diversity frame selection at 20% retention.
+frame_pruning,random_frames_020,experiments/frame_pruning/random_frames_020,notebooks,Runnable notebook for the random-frame control at 20% retention.
+modality_ablation,alpha_0_1_frameprune_020_mlp,experiments/modality_ablation/alpha_0_1_frameprune_020_mlp,outputs,Alpha-zero and alpha-one controls for 20% frame pruning; original inputs retained.
+modality_ablation,alpha_0_both_mlps,experiments/modality_ablation/alpha_0_both_mlps,outputs,Alpha-zero control evaluated with both the full-baseline and DivPrune classifiers. Original input snapshots are preserved under outputs/inputs.
+modality_ablation,alpha_1_divprune_030_mlp,experiments/modality_ablation/alpha_1_divprune_030_mlp,outputs,Alpha-one control evaluated with the DivPrune classifier; original inputs retained.
+modality_ablation,video_only_divprune_030,experiments/modality_ablation/video_only_divprune_030,PROTOCOL.md;notebooks,Protocol and runnable notebook for video-only DivPrune with two fixed MLPs.
+conflicts,meld_conflict_dataset,experiments/conflicts/meld_conflict_dataset,data,"Prepared conflict matrices, same-class controls and workbook."
+conflicts,qwen2_5_vl_3b_conflict_dev,experiments/conflicts/qwen2_5_vl_3b_conflict_dev,embeddings;outputs,"Development conflict experiment: paired index, embeddings, and evaluation outputs."
+information_horizon,qwen2_5_vl_3b_meld,experiments/information_horizon/qwen2_5_vl_3b_meld,notebooks,Kaggle notebook for token information scoring with fixed-MLP or LM readout; no scored artifacts yet.

@@ -1,0 +1,17 @@
+{
+  "checkpoint_archive": "/Users/pushkarsingh/Downloads/results/frame_pruning.zip",
+  "checkpoint_member": "outputs/qwen2_5_vl_3b_dinov2_base_frames_020/new_mlp/best_mlp.pt",
+  "checkpoint_sha256": "6d97f12decca03cfddcf309e90ecdadbf793005d496acbbc2f731f3a27a74c03",
+  "embedding_paths": {
+    "0": {
+      "dev": "outputs/alpha_0_both_mlps/inputs/meld_dev.pt",
+      "test": "outputs/alpha_0_both_mlps/inputs/meld_test.pt"
+    },
+    "1": {
+      "dev": "outputs/alpha_1_divprune_030_mlp/inputs/embeddings/qwen2_5_vl_3b_fused_alpha/alpha_1_00/meld_dev.pt",
+      "test": "outputs/alpha_1_divprune_030_mlp/inputs/embeddings/qwen2_5_vl_3b_fused_alpha/alpha_1_00/meld_test.pt"
+    }
+  },
+  "normalized_before_fusion": false,
+  "torch_version": "2.14.1"
+}

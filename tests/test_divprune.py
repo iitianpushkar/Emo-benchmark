@@ -6,9 +6,9 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from divprune import (
+from scripts.pruning.divprune import (
     build_divprune_sequence_indices,
     retained_token_count,
     select_diverse_token_indices,

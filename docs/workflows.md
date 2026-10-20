@@ -1,0 +1,691 @@
+# Benchmark workflows
+
+Run these commands from the repository root. These recipes include experiments
+whose artifacts are not present locally; consult the [catalog](../experiments/README.md)
+for available files.
+
+A lightweight benchmark for multimodal emotion recognition with frozen vision-language model embeddings. The current experiments use MELD video clips and utterances, extract representations from `Qwen/Qwen2.5-VL-3B-Instruct`, and train a small MLP classifier for seven-way emotion recognition.
+
+The main idea is intentionally simple:
+
+```text
+video clip + utterance
+  -> frozen VLM embedding extractor
+  -> pooled 2048-d representation
+  -> lightweight MLP classifier
+  -> accuracy, macro F1, weighted F1, confusion matrix
+```
+
+## Recorded baseline result
+
+The recorded baseline uses shared video-text hidden states from Qwen2.5-VL-3B-Instruct. Qwen is not fine-tuned and `model.generate()` is not used; embeddings are extracted before the language-model head and then classified with an MLP.
+
+| Representation | Dev Accuracy | Dev Macro F1 | Test Accuracy | Test Macro F1 | Notes |
+|---|---:|---:|---:|---:|---|
+| Video-only Qwen features | 0.3158 | 0.2204 | - | - | Visual features from `get_video_features()` |
+| Shared video + utterance Qwen states | 0.6107 | 0.4872 | 0.5883 | 0.4336 | Final shared hidden state with emotion-task prompt |
+
+The jump from video-only to shared video-text embeddings shows that MELD emotion recognition depends strongly on utterance semantics as well as visual cues. The model performs best on higher-support classes such as neutral, joy, surprise, and anger, while rare classes such as disgust and fear remain more difficult.
+
+Detailed metrics and figures are available in [experiments/baselines/qwen2_5_vl_3b_shared/results](../experiments/baselines/qwen2_5_vl_3b_shared/results/README.md).
+
+## Architecture
+
+![Qwen MELD benchmark architecture](../docs/assets/qwen_meld_architecture.svg)
+
+![Test confusion matrix](../experiments/baselines/qwen2_5_vl_3b_shared/results/figures/test_confusion_matrix.svg)
+
+## Dataset Example
+
+The repository does not redistribute MELD videos or labels. After downloading MELD.Raw, each sample is indexed like this:
+
+| Field | Example |
+|---|---|
+| `sample_id` | `train_dia0_utt4` |
+| `video_file` | `dia0_utt4.mp4` |
+| `utterance` | corresponding MELD utterance text |
+| `emotion` | one of `anger`, `disgust`, `fear`, `joy`, `neutral`, `sadness`, `surprise` |
+
+For shared embedding extraction, each MELD row is converted to a Qwen message containing the video path and the utterance text:
+
+```python
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "video", "video": video_path, "fps": 6, "max_frames": 64},
+            {
+                "type": "text",
+                "text": (
+                    "Task: infer the speaker's emotion from the video and utterance as exactly one of:\n"
+                    "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
+                    f"Utterance: {utterance}\n"
+                    "Focus on facial expression, body cues, scene context, and wording."
+                ),
+            },
+        ],
+    }
+]
+```
+
+## Dataset layout
+
+Datasets are intentionally not tracked by Git. Place local datasets under `dataset/`:
+
+```text
+emo-benchmark/
+  dataset/
+    MELD.Raw/
+      train/
+        train_sent_emo.csv
+        train_splits/
+      dev_sent_emo.csv
+      dev_splits_complete/
+      test_sent_emo.csv
+      output_repeated_splits_test/
+```
+
+## Benchmark Pipeline
+
+```text
+MELD video clips
+  -> sample video frames
+  -> extract frozen VLM embeddings before generation/decoder output
+  -> pool embeddings per sample
+  -> train a lightweight MLP classifier
+  -> evaluate accuracy, macro F1, weighted F1, and confusion matrix
+```
+
+Keep new run artifacts inside their experiment directory:
+
+```text
+experiments/<family>/<run>/embeddings/
+experiments/<family>/<run>/outputs/
+```
+
+
+## Environment setup
+
+For Colab, install dependencies at the top of the notebook:
+
+```bash
+pip install -r requirements.txt
+```
+
+For local development, create a virtual environment first:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+The `.venv/` folder is ignored by Git.
+
+## Prepare MELD indexes
+
+After placing `MELD.Raw` under `dataset/`, build verified split indexes:
+
+```bash
+python scripts/data/prepare_meld.py --meld-root dataset/MELD.Raw --split all
+```
+
+For a quick smoke test, limit rows per split:
+
+```bash
+python scripts/data/prepare_meld.py --meld-root dataset/MELD.Raw --split train --limit 100
+```
+
+
+## Extract Qwen video embeddings
+
+Extract frozen Qwen2.5-VL video embeddings before language generation:
+
+```bash
+python scripts/extraction/extract_qwen_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/baselines/qwen2_5_vl_3b/embeddings/meld_train_100.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --limit 100
+```
+
+The extractor uses Qwen as a frozen visual representation model and does not call `model.generate()`.
+
+## Extract shared Qwen video+utterance embeddings
+
+To include the MELD utterance with the corresponding video, use the shared extractor:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_train_100.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --limit 100
+```
+
+This runs Qwen with both video frames and the utterance text, appends Qwen's assistant-generation marker, then pools hidden states from the multimodal transformer before the LM head. The default prompt includes the seven emotion choices without revealing the gold label. The saved `.pt` file has the same structure as the video-only embeddings, so it can be passed directly to `train_mlp.py`.
+
+## Diverse-frame extraction at 20% retention
+
+To select frames before Qwen's vision encoder, embed the decoded candidate
+frames with frozen DINOv2-base and retain a centroid-seeded max-min cosine
+diverse subset:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_dev_index.csv \
+  --output-pt experiments/frame_pruning/qwen2_5_vl_3b_diverse_frames_020/embeddings/meld_dev.pt \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-size 224 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --frame-selection diverse \
+  --frame-retain-ratio 0.20 \
+  --frame-encoder-model facebook/dinov2-base \
+  --frame-encoder-device cuda \
+  --frame-encoder-batch-size 16 \
+  --save-dtype float32
+```
+
+Selection starts from the frame nearest the normalized embedding centroid,
+greedily adds the frame with the largest minimum cosine distance from the
+selected set, and restores chronological order before Qwen processing. The
+original decoded frames are passed to Qwen; DINOv2 embeddings are used only
+for selection. The effective FPS is adjusted to preserve the clip's average
+duration after pruning.
+
+Each sample records `candidate_frame_count`, `retained_frame_count`,
+`actual_frame_retain_ratio`, `selected_frame_indices`,
+`frame_selection_seconds`, and the candidate/Qwen sampling FPS values. With 64
+candidate frames, standard rounding retains 13 frames. Short clips retain at
+least one frame; Qwen's processor remains responsible for any temporal padding
+required by its patching scheme.
+
+For full split extraction, use the resumable chunk runner:
+
+```bash
+python scripts/extraction/run_qwen_shared_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/frame_pruning/qwen2_5_vl_3b_diverse_frames_020/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-selection diverse \
+  --frame-retain-ratio 0.20 \
+  --frame-encoder-model facebook/dinov2-base \
+  --frame-encoder-device cuda \
+  --frame-encoder-batch-size 16 \
+  --save-dtype float32 \
+  --skip-existing-complete
+```
+
+Resume, seed, and completed-chunk checks reject outputs produced with a
+different frame-selection mode, retention ratio, encoder, or implementation.
+
+## Random-frame control at 20% retention
+
+Use the same candidate-frame decoding and retention count as the DINOv2
+experiment, but sample frames uniformly at random before Qwen:
+
+```bash
+python scripts/extraction/run_qwen_shared_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/frame_pruning/qwen2_5_vl_3b_random_frames_020_seed42/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --min-frames 4 \
+  --max-frames 64 \
+  --frame-selection random \
+  --frame-retain-ratio 0.20 \
+  --frame-random-seed 42 \
+  --save-dtype float32 \
+  --skip-existing-complete
+```
+
+The base seed and `sample_id` deterministically produce a different random
+subset for each sample, independent of chunk order or parallel execution.
+Selected indices are sorted back into chronological order before Qwen. Random
+frame selection does not load or run DINOv2. Repeat the command for train,
+dev, and test with the corresponding index, chunk directory, and prefix.
+
+## DivPrune visual-token extraction
+
+To apply the [official DivPrune](https://github.com/vbdi/divprune) max-min
+cosine selection to Qwen's projected video tokens before the first
+language-model decoder layer:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_dev_index.csv \
+  --output-pt experiments/token_pruning/qwen2_5_vl_3b_divprune_shared/embeddings/meld_dev.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --visual-token-pruning divprune \
+  --divprune-retain-ratio 0.098
+```
+
+The default ratio follows the DivPrune authors' released configuration. Qwen
+first computes its normal projected video features and multimodal position IDs.
+The extractor retains the max-min-diverse visual subset, restores selected
+tokens to original sequence order, removes the remaining visual positions, and
+slices the attention mask and three-dimensional position IDs consistently. All
+text and special tokens are retained. Per-sample metadata records original,
+retained, and pruned visual-token counts.
+
+The same options work with chunked extraction:
+
+```bash
+python scripts/extraction/run_qwen_shared_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/token_pruning/qwen2_5_vl_3b_divprune_shared/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --visual-token-pruning divprune \
+  --divprune-retain-ratio 0.098 \
+  --save-dtype float32
+```
+
+Pruning and zero visual-token ablation are intentionally mutually exclusive.
+Resume and seed checks reject files created with another pruning method or
+retention ratio.
+
+## Random visual-token pruning control
+
+Use seeded uniform random pruning as a control for DivPrune at the same
+projected-visual-token retention ratio:
+
+```bash
+python scripts/extraction/run_qwen_shared_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/token_pruning/qwen2_5_vl_3b_random_prune_030_seed42/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --visual-token-pruning random \
+  --random-prune-retain-ratio 0.30 \
+  --random-prune-seed 42 \
+  --save-dtype float32
+```
+
+The base seed and `sample_id` determine a stable per-sample seed, so token
+selection is unchanged by chunk size, processing order, or resume behavior.
+Sampled visual-token indices are restored to their original sequence order;
+all text and special tokens are retained. Metadata records the implementation,
+base seed, derived sample seed, and actual retained-token ratio. Resume and
+seed checks reject random-pruning outputs created with another ratio or seed.
+
+## Zero visual-token ablation
+
+To measure the effect of Qwen's visual features while keeping the multimodal prompt and sequence layout fixed, extract a matched embedding set with the projected visual tokens replaced by zero immediately before they enter the language model:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_test_index.csv \
+  --output-pt experiments/modality_ablation/qwen2_5_vl_3b_zero_video_tokens/embeddings/meld_test.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --visual-token-ablation zero \
+  --resume
+```
+
+The processor creates the normal mixed token sequence and video grid. The extractor embeds that sequence, finds the exact positions whose token ID equals Qwen's `video_token_id`, and replaces those embedding vectors with zeros. It omits `pixel_values_videos`, so the visual encoder is not run. Qwen then continues through its language model with the original video-placeholder count, attention mask, multimodal position IDs, utterance, and prompt. The exact `video_token_count` is saved in each sample's metadata.
+
+Run the same command with the dev index and `meld_dev.pt` output path for development-set analysis. For chunked Kaggle extraction, `run_qwen_shared_chunks.py` accepts the same `--visual-token-ablation zero` option.
+
+Compare the zero-video embeddings with the existing full video+utterance embeddings using the same saved MLP:
+
+```bash
+python scripts/ablation/compare_visual_token_ablation.py \
+  --checkpoint experiments/baselines/qwen2_5_vl_3b_shared/outputs/best_mlp.pt \
+  --full-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_test_clean.pt \
+  --zero-video-pt experiments/modality_ablation/qwen2_5_vl_3b_zero_video_tokens/embeddings/meld_test.pt \
+  --output-dir experiments/modality_ablation/qwen2_5_vl_3b_visual_ablation/outputs \
+  --split-name test
+```
+
+The comparison aligns conditions by `sample_id`, applies the joint checkpoint's saved normalization to both, and reports paired accuracy/F1 results plus per-class softmax probabilities, log probabilities, and the log-probability difference:
+
+```text
+visual_delta(class) = log p(class | full video, utterance)
+                    - log p(class | zero visual tokens, utterance)
+```
+
+## Zero utterance-token ablation
+
+To keep the real video and task prompt while replacing only the MELD utterance token embeddings with zeros immediately before Qwen's language model:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_test_index.csv \
+  --output-pt experiments/modality_ablation/qwen2_5_vl_3b_zero_utterance_tokens/embeddings/meld_test.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_text \
+  --utterance-token-ablation zero \
+  --resume
+```
+
+The extractor locates the utterance with tokenizer character offsets, maps those tokens through the processor's expanded video-placeholder sequence, and zeroes only their LM input embeddings. Visual tokens, task instructions, emotion choices, special tokens, attention mask, and positions remain unchanged. Each sample records its exact `utterance_token_count`.
+
+Compare against the existing full embeddings with the fixed joint MLP:
+
+```bash
+python scripts/ablation/compare_modality_token_ablation.py \
+  --checkpoint experiments/baselines/qwen2_5_vl_3b_shared/outputs/best_mlp.pt \
+  --full-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_test_clean.pt \
+  --zero-utterance-pt experiments/modality_ablation/qwen2_5_vl_3b_zero_utterance_tokens/embeddings/meld_test.pt \
+  --output-dir experiments/modality_ablation/qwen2_5_vl_3b_utterance_ablation/outputs \
+  --split-name test
+```
+
+Passing both `--visual-token-ablation zero` and `--utterance-token-ablation zero` extracts the prompt-only condition while preserving both modality position blocks.
+
+## Alpha-weighted modality fusion diagnostic
+
+For a linear-fusion sensitivity analysis, extract video-only and text-only embeddings from the same Qwen LM hidden-state space:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_video_only/embeddings/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode video_only
+
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_text_only/embeddings/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --modality-mode text_only
+```
+
+Repeat for `dev` and `test`. Then create one fused embedding set:
+
+```bash
+python scripts/fusion/fuse_modality_embeddings.py \
+  --video-train-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_video_only/embeddings/meld_train.pt \
+  --text-train-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_text_only/embeddings/meld_train.pt \
+  --video-dev-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_video_only/embeddings/meld_dev.pt \
+  --text-dev-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_text_only/embeddings/meld_dev.pt \
+  --video-test-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_video_only/embeddings/meld_test.pt \
+  --text-test-pt experiments/modality_ablation/qwen2_5_vl_3b_lm_text_only/embeddings/meld_test.pt \
+  --output-dir experiments/fusion/qwen2_5_vl_3b_alpha/embeddings/alpha_0_50 \
+  --alpha 0.5
+```
+
+This aligns video/text rows by `sample_id`, drops non-finite rows by default, and computes:
+
+```text
+fused = alpha * standardized_video + (1 - alpha) * standardized_text
+```
+
+To run the full sweep with the already-trained shared video+text MLP checkpoint:
+
+```bash
+python scripts/fusion/run_alpha_sweep.py \
+  --video-dir experiments/modality_ablation/qwen2_5_vl_3b_lm_video_only/embeddings \
+  --text-dir experiments/modality_ablation/qwen2_5_vl_3b_lm_text_only/embeddings \
+  --fused-root experiments/fusion/qwen2_5_vl_3b_alpha/embeddings \
+  --output-root experiments/fusion/qwen2_5_vl_3b_alpha/outputs \
+  --checkpoint experiments/baselines/qwen2_5_vl_3b_shared/outputs/best_mlp.pt
+```
+
+This does not train a new classifier per alpha. It creates each fused embedding set, then evaluates the fixed shared-space MLP with `evaluate_mlp.py`.
+
+Summarize the sweep:
+
+```bash
+python scripts/fusion/summarize_alpha_sweep.py \
+  --output-root experiments/fusion/qwen2_5_vl_3b_alpha/outputs \
+  --output-csv experiments/fusion/qwen2_5_vl_3b_alpha/outputs/summary.csv
+```
+
+Here `alpha` is the video weight and `1 - alpha` is the text weight. The curve measures sensitivity to an artificial linear combination of independently extracted embeddings; it does not recover Qwen's internal modality weights or establish modality overshadowing by itself.
+
+If Kaggle stops a long extraction run, rerun the same command with `--resume`. Existing `sample_ids` in the output file are skipped, so only missing clips are extracted:
+
+```bash
+python scripts/extraction/extract_qwen_shared_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --resume
+```
+
+Previous error samples are skipped during resume by default. Add `--retry-errors` if you want to attempt them again.
+
+For long Kaggle runs, prefer chunked extraction. Each chunk launches a fresh Python process, so RAM is released between chunks. If a partial merged file already exists, `--seed-pt` copies its existing `sample_ids` into the matching chunk files first:
+
+```bash
+python scripts/extraction/run_qwen_shared_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/baselines/qwen2_5_vl_3b_shared/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --seed-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_train.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5
+```
+
+After all chunks finish, merge them into the single file expected by `train_mlp.py`:
+
+```bash
+python scripts/extraction/merge_embedding_chunks.py \
+  --chunks-dir experiments/baselines/qwen2_5_vl_3b_shared/chunks/train \
+  --output-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_train.pt \
+  --pattern "train_*.pt"
+```
+
+## Extract InternVL3 video+utterance embeddings
+
+InternVL3 uses its native video processor and its final shared language hidden
+state before the LM head. Frames are decoded with Decord at the requested FPS,
+capped at `--max-frames`, and processed at the checkpoint's native resolution.
+No text is generated and the InternVL3 weights remain frozen.
+
+Run a small smoke test first:
+
+```bash
+python scripts/extraction/extract_internvl3_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/baselines/internvl3_2b/embeddings/meld_train_100.pt \
+  --fps 6 \
+  --max-frames 64 \
+  --limit 100 \
+  --pooling last \
+  --save-dtype float32
+```
+
+For a full Kaggle run, use resumable chunks. Each chunk runs in a fresh process,
+which releases model and decoder memory before the next chunk starts:
+
+```bash
+python scripts/extraction/run_internvl3_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/baselines/internvl3_2b_shared/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --max-frames 64 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --skip-existing-complete
+```
+
+Repeat the command for dev and test with their corresponding index CSV,
+chunk directory, and prefix. Merge each completed split:
+
+```bash
+python scripts/extraction/merge_embedding_chunks.py \
+  --chunks-dir experiments/baselines/internvl3_2b_shared/chunks/train \
+  --output-pt experiments/baselines/internvl3_2b_shared/embeddings/meld_train.pt \
+  --pattern 'train_*.pt'
+```
+
+The merged files use the same payload format as the Qwen embeddings, so the
+existing MLP training and evaluation scripts work without model-specific
+changes. Do not seed an InternVL3 run from a Qwen `.pt` file because their
+representations and dimensions differ.
+
+Train the InternVL3 probe after merging train, dev, and test:
+
+```bash
+python scripts/classification/train_mlp.py \
+  --train-pt experiments/baselines/internvl3_2b_shared/embeddings/meld_train.pt \
+  --dev-pt experiments/baselines/internvl3_2b_shared/embeddings/meld_dev.pt \
+  --test-pt experiments/baselines/internvl3_2b_shared/embeddings/meld_test.pt \
+  --output-dir experiments/baselines/internvl3_2b_shared/outputs \
+  --hidden-dim 512 \
+  --epochs 50
+```
+
+## Extract SmolVLM2 video+utterance embeddings
+
+`HuggingFaceTB/SmolVLM2-2.2B-Instruct` is evaluated at the benchmark's default
+6 FPS and at most 64 frames. Spatial preprocessing remains checkpoint-native:
+384 x 384 frames and 81 visual tokens per frame. The extractor intentionally
+has no frame-size option, preventing an accidental spatial-resolution shift.
+Decord only decodes the uniformly selected frames; the official processor
+performs resizing, normalization, padding, visual token construction, and
+text-video fusion. SmolVLM2's official temporal default is 1 FPS, which remains
+available with `--fps 1` and should be reported as a separate configuration.
+
+Run a 100-sample smoke test before starting all three splits:
+
+```bash
+python scripts/extraction/extract_smolvlm2_embeddings.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --output-pt experiments/baselines/smolvlm2_2_2b_shared/embeddings/meld_train_100.pt \
+  --limit 100 \
+  --fps 6 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32
+```
+
+Use fresh-process chunks for the complete train split:
+
+```bash
+python scripts/extraction/run_smolvlm2_chunks.py \
+  --index-csv data/indexes/meld_train_index.csv \
+  --chunks-dir experiments/baselines/smolvlm2_2_2b_shared/chunks/train \
+  --chunk-prefix train \
+  --chunk-size 500 \
+  --fps 6 \
+  --pooling last \
+  --prompt-style emotion_task \
+  --save-dtype float32 \
+  --gc-every 5 \
+  --skip-existing-complete
+```
+
+Repeat for dev and test by changing the index, chunk directory, and prefix.
+Merge each split using the existing model-agnostic merger:
+
+```bash
+python scripts/extraction/merge_embedding_chunks.py \
+  --chunks-dir experiments/baselines/smolvlm2_2_2b_shared/chunks/train \
+  --output-pt experiments/baselines/smolvlm2_2_2b_shared/embeddings/meld_train.pt \
+  --pattern 'train_*.pt'
+```
+
+Train the same MLP probe after merging all splits:
+
+```bash
+python scripts/classification/train_mlp.py \
+  --train-pt experiments/baselines/smolvlm2_2_2b_shared/embeddings/meld_train.pt \
+  --dev-pt experiments/baselines/smolvlm2_2_2b_shared/embeddings/meld_dev.pt \
+  --test-pt experiments/baselines/smolvlm2_2_2b_shared/embeddings/meld_test.pt \
+  --output-dir experiments/baselines/smolvlm2_2_2b_shared/outputs \
+  --hidden-dim 512 \
+  --epochs 50
+```
+
+The scripts default to the project's 6 FPS / 64-frame benchmark setting. Pass
+`--fps 1` for a separate run using SmolVLM2's official temporal default. Never
+resume, merge, or compare chunks as one run when their FPS settings differ.
+
+A ready-to-run Kaggle workflow is provided in
+`archive/kaggle_runs/smolvlm2_meld_benchmark.ipynb` (historical notebook; use the current script commands above for the reorganized checkout). Its configuration cell controls FPS,
+chunk size, and paths for all three splits, and automatically places different
+FPS runs in separate directories.
+
+Benchmark validity checks:
+
+- Use identical extraction settings for train, dev, and test.
+- Keep separate chunk directories for every model and sampling configuration.
+- Keep the VLM frozen and select MLP checkpoints using dev data only.
+- Do not use test metrics for hyperparameter selection.
+- Report failed/corrupt clips and the final successful sample count per split.
+- Compare native-preprocessing runs separately from matched-compute ablations.
+
+## Train MLP classifier
+
+After extracting embeddings for train and dev splits, train the lightweight classifier:
+
+```bash
+python scripts/classification/train_mlp.py \
+  --train-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_train.pt \
+  --dev-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_dev.pt \
+  --test-pt experiments/baselines/qwen2_5_vl_3b_shared/embeddings/meld_test.pt \
+  --output-dir experiments/baselines/qwen2_5_vl_3b_shared/outputs \
+  --hidden-dim 512 \
+  --epochs 50
+```
+
+Under the hood, the trainer standardizes embeddings using train-set mean/std, trains a one-hidden-layer MLP, and selects the best checkpoint by dev macro F1.
+
+## Evaluate saved MLP
+
+Evaluate a trained checkpoint on dev or test embeddings without retraining:
+
+```bash
+python scripts/classification/evaluate_mlp.py \
+  --checkpoint experiments/baselines/qwen2_5_vl_3b/outputs/best_mlp.pt \
+  --embeddings-pt experiments/baselines/qwen2_5_vl_3b/embeddings/meld_test.pt \
+  --output-dir experiments/baselines/qwen2_5_vl_3b/outputs \
+  --split-name test
+```
+
+Under the hood, this reloads the MLP, applies the train-set feature mean/std saved in the checkpoint, and writes metrics plus per-sample predictions.
+
+## Information Horizon analysis
+
+Compute per-token, per-decoder-depth probability differences using the paper's
+single-visual-token versus no-visual-token intervention. Supports the paper's
+first-answer-token LM readout and an explicitly adapted fixed emotion-MLP readout.
+See [the run guide](../docs/information_horizon.md) for pilot commands, exhaustive
+scoring, resume behavior, outputs, and interpretation limits.

@@ -1,0 +1,18 @@
+{
+  "source_archive": "/Users/pushkarsingh/Downloads/results/alpha_sweep.zip",
+  "source_archive_sha256": "54eead0c71370e2156447373eb015a19001e3f9a41e0e12ef7fc7c674cc46903",
+  "alpha_video": 0.0,
+  "beta_text": 1.0,
+  "normalized_before_fusion": false,
+  "checkpoints": {
+    "full_baseline_mlp": {
+      "path": "outputs/qwen2_5_vl_3b_shared/best_mlp.pt",
+      "sha256": "e3da41d928482b125d911e080207d6c2f8bdca2b6d5e9e670270780f2032b162"
+    },
+    "divprune_030_mlp": {
+      "path": "assets/checkpoints/qwen2_5_vl_3b_divprune_030_best_mlp.pt",
+      "sha256": "e8d27d957fa7c6715780df9e96f19dbdeae674251dfda5db592d9e7eda97afc5"
+    }
+  },
+  "torch_version": "2.14.1"
+}

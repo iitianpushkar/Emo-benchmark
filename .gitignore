@@ -14,3 +14,10 @@ __pycache__/
 
 # OS files
 .DS_Store
+
+# Additional project environments
+.venv-*/
+
+# Local experiment caches and unfinished writes
+experiments/**/.cache/
+experiments/**/*.tmp

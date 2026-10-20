@@ -6,9 +6,9 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from random_prune import (
+from scripts.pruning.random_prune import (
     build_random_prune_sequence_indices,
     sample_seed,
     select_random_token_indices,
@@ -21,7 +21,7 @@ class RandomPruneTests(unittest.TestCase):
         second = select_random_token_indices(20, retain_ratio=0.30, seed=42)
         self.assertEqual(first.tolist(), second.tolist())
         self.assertEqual(len(first), 6)
-        self.assertEqual(len(first.unique()), 3)
+        self.assertEqual(len(first.unique()), len(first))
         self.assertEqual(first.tolist(), sorted(first.tolist()))
 
     def test_different_seeds_change_selection(self) -> None:

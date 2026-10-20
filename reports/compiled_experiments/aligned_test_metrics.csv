@@ -1,0 +1,29 @@
+experiment,method,family,n,accuracy,macro_f1,weighted_f1
+baseline,Full baseline,main,2598,0.588145,0.433615,0.594606
+divprune_070,DivPrune 0.70 + new MLP,pruning,2598,0.579292,0.421634,0.585686
+divprune_070,DivPrune 0.70 + previous MLP,pruning,2598,0.583526,0.411901,0.588159
+divprune_030,DivPrune 0.30 + new MLP,pruning,2598,0.608545,0.454063,0.612520
+divprune_030,DivPrune 0.30 + previous MLP,pruning,2598,0.595073,0.410430,0.591151
+divprune_015,DivPrune 0.15 + new MLP,pruning,2598,0.589299,0.441704,0.594189
+divprune_015,DivPrune 0.15 + previous MLP,pruning,2598,0.596228,0.402383,0.587978
+divprune_005,DivPrune 0.05 + new MLP,pruning,2598,0.568899,0.427762,0.586488
+divprune_005,DivPrune 0.05 + previous MLP,pruning,2598,0.578907,0.376523,0.564898
+random_030,Random tokens 0.30 + new MLP,pruning,2598,0.585835,0.426387,0.590018
+random_030,Random tokens 0.30 + previous MLP,pruning,2598,0.592764,0.425679,0.594619
+random_005,Random tokens 0.05 + new MLP,pruning,2598,0.565050,0.429067,0.584887
+random_005,Random tokens 0.05 + previous MLP,pruning,2598,0.592764,0.396578,0.582721
+frame_020,DINOv2 diverse frames 0.20 + new MLP,pruning,2598,0.600077,0.439427,0.602625
+frame_020,DINOv2 diverse frames 0.20 + previous MLP,pruning,2598,0.591994,0.428301,0.596009
+visual_ablation,Zero visual contribution,ablation,2598,0.385681,0.139385,0.326674
+utterance_ablation,Zero utterance contribution,ablation,2598,0.358353,0.176886,0.343812
+alpha_0_00,Fusion video alpha 0.00,alpha_sweep,2598,0.588915,0.344956,0.531193
+alpha_0_10,Fusion video alpha 0.10,alpha_sweep,2598,0.588915,0.334936,0.522689
+alpha_0_20,Fusion video alpha 0.20,alpha_sweep,2598,0.588530,0.327349,0.515094
+alpha_0_30,Fusion video alpha 0.30,alpha_sweep,2598,0.586220,0.305491,0.503487
+alpha_0_40,Fusion video alpha 0.40,alpha_sweep,2598,0.571594,0.268639,0.479566
+alpha_0_50,Fusion video alpha 0.50,alpha_sweep,2598,0.562741,0.244007,0.463289
+alpha_0_60,Fusion video alpha 0.60,alpha_sweep,2598,0.541955,0.208747,0.430597
+alpha_0_70,Fusion video alpha 0.70,alpha_sweep,2598,0.523095,0.185198,0.405363
+alpha_0_80,Fusion video alpha 0.80,alpha_sweep,2598,0.502694,0.164743,0.377748
+alpha_0_90,Fusion video alpha 0.90,alpha_sweep,2598,0.481524,0.129631,0.344843
+alpha_1_00,Fusion video alpha 1.00,alpha_sweep,2598,0.461509,0.115703,0.326912
