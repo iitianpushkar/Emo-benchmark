@@ -13,6 +13,7 @@ retention, extraction errors, sample coverage, and aligned dev/test metrics.
 It trains a matched MLP on the combined-pruning embeddings and also evaluates
 the unchanged full-baseline MLP. Attach the current `benchmark-code` and
 `meld-dataset` Kaggle inputs, enable GPU and Internet, and run all cells. The
-extraction saves progress every 25 samples and can resume from its output `.pt`
-files with the same settings. No results have been run locally for this combined
+extraction runs in separate 500-sample processes, saves progress every 25
+samples within a chunk, skips completed chunks on rerun, and merges the chunk
+files before classification. No results have been run locally for this combined
 condition.

@@ -120,6 +120,12 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of projected visual tokens retained by DivPrune.",
     )
     parser.add_argument(
+        "--target-combined-visual-retain-ratio",
+        type=float,
+        default=None,
+        help="Per-sample final visual-token target relative to unpruned Qwen tokens.",
+    )
+    parser.add_argument(
         "--random-prune-retain-ratio",
         type=float,
         default=DEFAULT_RANDOM_RETAIN_RATIO,
@@ -240,6 +246,34 @@ def payload_divprune_retain_ratio(payload: dict[str, Any]) -> float | None:
     if len(nested_values) > 1:
         raise ValueError(f"Payload mixes DivPrune retain ratios: {sorted(nested_values)}")
     return next(iter(nested_values), None)
+
+
+def payload_combined_target_ratio(payload: dict[str, Any]) -> float | None:
+    config = payload.get("config", {})
+    if "target_combined_visual_retain_ratio" in config:
+        value = config["target_combined_visual_retain_ratio"]
+        return None if value is None else float(value)
+    nested_values = {
+        item.get("config", {}).get("target_combined_visual_retain_ratio")
+        for item in config.get("merged_from", [])
+        if isinstance(item, dict)
+    }
+    if len(nested_values) > 1:
+        raise ValueError(f"Payload mixes combined visual-token targets: {sorted(nested_values, key=str)}")
+    value = next(iter(nested_values), None)
+    return None if value is None else float(value)
+
+
+def validate_combined_target_ratio(
+    payload: dict[str, Any], expected_ratio: float | None, context: str
+) -> None:
+    saved_ratio = payload_combined_target_ratio(payload)
+    if saved_ratio is None and expected_ratio is None:
+        return
+    if saved_ratio is None or expected_ratio is None or abs(saved_ratio - expected_ratio) > 1e-12:
+        raise ValueError(
+            f"{context} has target_combined_visual_retain_ratio={saved_ratio}, expected {expected_ratio}"
+        )
 
 
 def payload_pruning_value(payload: dict[str, Any], pruning: str, key: str) -> Any:
@@ -406,6 +440,7 @@ def existing_chunk_count(
     expected_frame_retain_ratio: float,
     expected_frame_random_seed: int,
     expected_frame_encoder_model: str,
+    expected_combined_target_ratio: float | None,
 ) -> int | None:
     if not path.exists():
         return None
@@ -453,6 +488,7 @@ def existing_chunk_count(
             expected_frame_encoder_model,
             f"Existing chunk {path}",
         )
+        validate_combined_target_ratio(payload, expected_combined_target_ratio, f"Existing chunk {path}")
         return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
     except ValueError:
         raise
@@ -485,6 +521,7 @@ def seed_chunks_from_existing_pt(
     frame_retain_ratio: float,
     frame_random_seed: int,
     frame_encoder_model: str,
+    target_combined_visual_retain_ratio: float | None,
 ) -> None:
     if seed_pt is None or not seed_pt.exists():
         return
@@ -536,6 +573,7 @@ def seed_chunks_from_existing_pt(
         frame_encoder_model,
         f"Seed payload {seed_pt}",
     )
+    validate_combined_target_ratio(payload, target_combined_visual_retain_ratio, f"Seed payload {seed_pt}")
 
     sample_ids = [str(item) for item in payload.get("sample_ids", [])]
     embeddings = payload["embeddings"].cpu()
@@ -625,6 +663,7 @@ def seed_chunks_from_existing_pt(
                 ),
                 "visual_token_pruning": visual_token_pruning,
                 "divprune_retain_ratio": divprune_retain_ratio,
+                "target_combined_visual_retain_ratio": target_combined_visual_retain_ratio,
                 "random_prune_retain_ratio": random_prune_retain_ratio,
                 "random_prune_seed": random_prune_seed,
                 "visual_token_pruning_implementation": (
@@ -658,6 +697,11 @@ def main() -> None:
         raise ValueError("--chunk-size must be positive")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
+    if args.target_combined_visual_retain_ratio is not None:
+        if not 0.0 < args.target_combined_visual_retain_ratio <= 1.0:
+            raise ValueError("--target-combined-visual-retain-ratio must be in the interval (0, 1]")
+        if args.frame_selection != "diverse" or args.visual_token_pruning != "divprune":
+            raise ValueError("Combined retention target requires diverse frame selection and DivPrune")
     if not 0.0 < args.random_prune_retain_ratio <= 1.0:
         raise ValueError("--random-prune-retain-ratio must be in the interval (0, 1]")
     if not 0.0 < args.frame_retain_ratio <= 1.0:
@@ -711,6 +755,7 @@ def main() -> None:
             frame_retain_ratio=args.frame_retain_ratio,
             frame_random_seed=args.frame_random_seed,
             frame_encoder_model=args.frame_encoder_model,
+            target_combined_visual_retain_ratio=args.target_combined_visual_retain_ratio,
         )
 
     for chunk_start in range(start, stop, args.chunk_size):
@@ -731,6 +776,7 @@ def main() -> None:
                 args.frame_retain_ratio,
                 args.frame_random_seed,
                 args.frame_encoder_model,
+                args.target_combined_visual_retain_ratio,
             )
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")
@@ -799,6 +845,11 @@ def main() -> None:
 
         if args.video_max_pixels is not None:
             cmd.extend(["--video-max-pixels", str(args.video_max_pixels)])
+        if args.target_combined_visual_retain_ratio is not None:
+            cmd.extend([
+                "--target-combined-visual-retain-ratio",
+                str(args.target_combined_visual_retain_ratio),
+            ])
         if args.resume:
             cmd.append("--resume")
         if args.retry_errors:

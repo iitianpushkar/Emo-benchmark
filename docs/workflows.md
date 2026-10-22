@@ -314,6 +314,8 @@ frame and post-frame token ratios is not a reliable measure. The extractor
 preprocesses the unpruned video to count reference visual tokens and records
 actual combined retention in the output metadata. The notebook evaluates both
 a matched MLP and the fixed baseline MLP on sample-aligned dev/test sets.
+Extraction runs in resumable 500-sample chunks, then merges each split before
+classification.
 
 ## Random visual-token pruning control
 
