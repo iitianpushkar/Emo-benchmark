@@ -15,5 +15,6 @@ the unchanged full-baseline MLP. Attach the current `benchmark-code` and
 `meld-dataset` Kaggle inputs, enable GPU and Internet, and run all cells. The
 extraction runs in separate 500-sample processes, saves progress every 25
 samples within a chunk, skips completed chunks on rerun, and merges the chunk
-files before classification. No results have been run locally for this combined
+files before classification. A prior matching single-file extraction can seed
+the chunks, preserving completed samples. No results have been run locally for this combined
 condition.
