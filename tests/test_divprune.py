@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.pruning.divprune import (
     build_divprune_sequence_indices,
+    combined_target_retention,
     retained_token_count,
     select_diverse_token_indices,
 )
@@ -19,6 +20,15 @@ class DivPruneTests(unittest.TestCase):
     def test_official_ratio_counts(self) -> None:
         self.assertEqual(retained_token_count(864, 0.098), 85)
         self.assertEqual(retained_token_count(2880, 0.098), 282)
+
+    def test_combined_target_counts_against_unpruned_tokens(self) -> None:
+        # A 20% frame sample can still contain 288 of the original 512 Qwen
+        # visual tokens because the processor changes tokens per frame.
+        count, ratio = combined_target_retention(512, 288, 0.15)
+        self.assertEqual(count, 77)
+        self.assertEqual(retained_token_count(288, ratio), 77)
+        self.assertAlmostEqual(count / 512, 0.15, delta=0.001)
+        self.assertEqual(combined_target_retention(100, 10, 0.15)[0], 10)
 
     def test_selection_is_exact_unique_sorted_and_deterministic(self) -> None:
         tokens = torch.tensor(

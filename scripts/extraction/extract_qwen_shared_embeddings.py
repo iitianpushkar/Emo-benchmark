@@ -42,6 +42,7 @@ from scripts.pruning.divprune import (
     IMPLEMENTATION_NAME as DIVPRUNE_IMPLEMENTATION,
     REFERENCE_COMMIT as DIVPRUNE_REFERENCE_COMMIT,
     build_divprune_sequence_indices,
+    combined_target_retention,
 )
 from scripts.pruning.frame_diversity import (
     DEFAULT_ENCODER_MODEL as DEFAULT_FRAME_ENCODER_MODEL,
@@ -203,6 +204,15 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of projected visual tokens retained by DivPrune (official default: 0.098).",
     )
     parser.add_argument(
+        "--target-combined-visual-retain-ratio",
+        type=float,
+        default=None,
+        help=(
+            "With frame selection and DivPrune, adapt the post-frame token count per sample "
+            "to this fraction of the unpruned Qwen visual-token count."
+        ),
+    )
+    parser.add_argument(
         "--random-prune-retain-ratio",
         type=float,
         default=DEFAULT_RANDOM_RETAIN_RATIO,
@@ -348,6 +358,7 @@ def load_resume_payload(
     frame_retain_ratio: float,
     frame_random_seed: int,
     frame_encoder_model: str,
+    target_combined_visual_retain_ratio: float | None,
 ) -> tuple[list[torch.Tensor], list[int], list[str], list[dict[str, Any]], list[dict[str, str]], set[str]]:
     if not path.exists():
         return [], [], [], [], [], set()
@@ -362,6 +373,12 @@ def load_resume_payload(
     saved_utterance_ablation = saved_config.get("utterance_token_ablation", "none")
     saved_pruning = saved_config.get("visual_token_pruning", "none")
     saved_frame_selection = saved_config.get("frame_selection", "none")
+    saved_combined_ratio = saved_config.get("target_combined_visual_retain_ratio")
+    if saved_combined_ratio != target_combined_visual_retain_ratio:
+        raise ValueError(
+            f"Cannot resume from {path}; target_combined_visual_retain_ratio="
+            f"{saved_combined_ratio!r}, expected {target_combined_visual_retain_ratio!r}"
+        )
     if saved_modality_mode is not None and saved_modality_mode != modality_mode:
         raise ValueError(
             f"Cannot resume from {path}; modality_mode={saved_modality_mode!r}, expected {modality_mode!r}"
@@ -899,12 +916,30 @@ def extract_shared_embedding(
     frame_selector: FrameDiversitySelector | None,
     frame_retain_ratio: float,
     frame_random_sample_seed: int,
+    target_combined_visual_retain_ratio: float | None,
 ) -> tuple[torch.Tensor, int, int, int, dict[str, Any]]:
     prompt = make_prompt(utterance, prompt_style, modality_mode)
     messages = make_message(video_path, utterance, fps, min_frames, max_frames, frame_size, prompt_style, modality_mode)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
     image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
     video_kwargs = fix_video_kwargs(video_kwargs)
+
+    full_visual_token_count = None
+    if target_combined_visual_retain_ratio is not None:
+        video_token_id = getattr(model.model.config, "video_token_id", None)
+        if video_token_id is None:
+            raise AttributeError("Qwen config does not expose video_token_id")
+        full_processor_inputs: dict[str, Any] = {
+            "text": [text], "padding": True, "return_tensors": "pt", "videos": video_inputs,
+        }
+        if image_inputs:
+            full_processor_inputs["images"] = image_inputs
+        full_processor_inputs.update(video_kwargs)
+        full_inputs = processor(**full_processor_inputs)
+        full_visual_token_count = int(full_inputs["input_ids"].eq(video_token_id).sum().item())
+        del full_inputs
+        if full_visual_token_count <= 0:
+            raise ValueError("Unpruned Qwen input has no visual tokens")
 
     frame_selection_metadata: dict[str, Any] = {
         "candidate_frame_count": None,
@@ -1016,6 +1051,16 @@ def extract_shared_embedding(
         if video_token_id is not None and "input_ids" in inputs
         else 0
     )
+    effective_divprune_retain_ratio = divprune_retain_ratio
+    if target_combined_visual_retain_ratio is not None:
+        retained_target, effective_divprune_retain_ratio = combined_target_retention(
+            full_visual_token_count,
+            video_token_count,
+            target_combined_visual_retain_ratio,
+        )
+        frame_selection_metadata["full_visual_token_count"] = full_visual_token_count
+        frame_selection_metadata["target_combined_visual_token_count"] = retained_target
+        frame_selection_metadata["effective_divprune_retain_ratio"] = effective_divprune_retain_ratio
 
     try:
         with torch.inference_mode():
@@ -1031,7 +1076,7 @@ def extract_shared_embedding(
                 utterance_token_ablation,
                 utterance_token_mask,
                 visual_token_pruning,
-                divprune_retain_ratio,
+                effective_divprune_retain_ratio,
                 random_prune_retain_ratio,
                 random_prune_sample_seed,
             )
@@ -1079,6 +1124,11 @@ def main() -> None:
         raise ValueError("Visual-token pruning requires a modality mode that includes video")
     if args.visual_token_pruning != "none" and args.visual_token_ablation != "none":
         raise ValueError("Visual-token pruning and visual-token ablation cannot be combined")
+    if args.target_combined_visual_retain_ratio is not None:
+        if not 0.0 < args.target_combined_visual_retain_ratio <= 1.0:
+            raise ValueError("--target-combined-visual-retain-ratio must be in (0, 1]")
+        if args.frame_selection != "diverse" or args.visual_token_pruning != "divprune":
+            raise ValueError("Combined retention target requires diverse frame selection and DivPrune")
     if not 0.0 < args.divprune_retain_ratio <= 1.0:
         raise ValueError("--divprune-retain-ratio must be in the interval (0, 1]")
     if not 0.0 < args.random_prune_retain_ratio <= 1.0:
@@ -1128,7 +1178,9 @@ def main() -> None:
     print(f"Utterance-token ablation: {args.utterance_token_ablation}")
     print(
         f"Visual-token pruning: {args.visual_token_pruning}; "
-        f"DivPrune retain ratio={args.divprune_retain_ratio}; "
+        f"DivPrune retain ratio="
+        f"{'adaptive per sample' if args.target_combined_visual_retain_ratio is not None else args.divprune_retain_ratio}; "
+        f"combined target ratio={args.target_combined_visual_retain_ratio}; "
         f"random retain ratio={args.random_prune_retain_ratio}; "
         f"random seed={args.random_prune_seed}"
     )
@@ -1183,6 +1235,7 @@ def main() -> None:
             frame_retain_ratio=args.frame_retain_ratio,
             frame_random_seed=args.frame_random_seed,
             frame_encoder_model=args.frame_encoder_model,
+            target_combined_visual_retain_ratio=args.target_combined_visual_retain_ratio,
         )
         print(f"Resume enabled: loaded {len(sample_ids)} embeddings and {len(errors)} previous errors")
         print(f"Resume skip set: {len(done_ids)} sample ids")
@@ -1239,6 +1292,7 @@ def main() -> None:
                 frame_selector=frame_selector,
                 frame_retain_ratio=args.frame_retain_ratio,
                 frame_random_sample_seed=frame_random_sample_seed,
+                target_combined_visual_retain_ratio=args.target_combined_visual_retain_ratio,
             )
             if not torch.isfinite(embedding).all():
                 raise ValueError("Extracted embedding contains NaN or Inf values")
@@ -1265,6 +1319,11 @@ def main() -> None:
             row_metadata["pruned_visual_token_count"] = video_token_count - retained_video_token_count
             row_metadata["actual_visual_token_retain_ratio"] = (
                 retained_video_token_count / video_token_count if video_token_count else None
+            )
+            full_visual_token_count = frame_selection_metadata.get("full_visual_token_count")
+            row_metadata["actual_combined_visual_token_retain_ratio"] = (
+                retained_video_token_count / full_visual_token_count
+                if full_visual_token_count else None
             )
             row_metadata["visual_token_pruning"] = args.visual_token_pruning
             row_metadata["visual_token_pruning_implementation"] = (

@@ -31,6 +31,21 @@ def retained_token_count(num_tokens: int, retain_ratio: float) -> int:
     return min(num_tokens, max(1, int(round(num_tokens * retain_ratio))))
 
 
+def combined_target_retention(
+    full_visual_tokens: int,
+    available_visual_tokens: int,
+    target_ratio: float,
+) -> tuple[int, float]:
+    """Choose a post-frame DivPrune count for a target of the full token count."""
+    if full_visual_tokens <= 0 or available_visual_tokens <= 0:
+        raise ValueError("Visual token counts must be positive")
+    if not 0.0 < target_ratio <= 1.0:
+        raise ValueError("target_ratio must be in the interval (0, 1]")
+    desired = retained_token_count(full_visual_tokens, target_ratio)
+    retained = min(desired, available_visual_tokens)
+    return retained, retained / available_visual_tokens
+
+
 def select_diverse_token_indices(
     visual_tokens: torch.Tensor,
     retain_ratio: float = DEFAULT_RETAIN_RATIO,

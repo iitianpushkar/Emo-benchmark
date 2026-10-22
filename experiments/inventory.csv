@@ -12,3 +12,4 @@ modality_ablation,video_only_divprune_030,experiments/modality_ablation/video_on
 conflicts,meld_conflict_dataset,experiments/conflicts/meld_conflict_dataset,data,"Prepared conflict matrices, same-class controls and workbook."
 conflicts,qwen2_5_vl_3b_conflict_dev,experiments/conflicts/qwen2_5_vl_3b_conflict_dev,embeddings;outputs,"Development conflict experiment: paired index, embeddings, and evaluation outputs."
 information_horizon,qwen2_5_vl_3b_meld,experiments/information_horizon/qwen2_5_vl_3b_meld,notebooks,Kaggle notebook for automatic scoring of the first 2 dev samples with the fixed baseline MLP; no scored artifacts yet.
+combined_pruning,qwen2_5_vl_3b_dinov2_050_divprune_target_015,experiments/combined_pruning/qwen2_5_vl_3b_dinov2_050_divprune_target_015,notebooks,DINOv2 50% frame selection plus adaptive DivPrune to about 15% of unpruned Qwen visual tokens; no scored artifacts yet.

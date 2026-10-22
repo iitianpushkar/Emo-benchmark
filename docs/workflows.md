@@ -302,6 +302,19 @@ Pruning and zero visual-token ablation are intentionally mutually exclusive.
 Resume and seed checks reject files created with another pruning method or
 retention ratio.
 
+## Combined DINOv2 frame selection and DivPrune token selection
+
+The [combined-pruning Kaggle notebook](../experiments/combined_pruning/qwen2_5_vl_3b_dinov2_050_divprune_target_015/notebooks/combined_frame_token_pruning_015.ipynb)
+first selects 50% of candidate frames using DINOv2-base cosine diversity, then
+applies DivPrune before the first Qwen decoder block. It targets 15% of the
+unpruned Qwen visual tokens per sample with
+`--target-combined-visual-retain-ratio 0.15`. Qwen may allocate a different
+number of visual tokens per frame after frame selection, so multiplying the
+frame and post-frame token ratios is not a reliable measure. The extractor
+preprocesses the unpruned video to count reference visual tokens and records
+actual combined retention in the output metadata. The notebook evaluates both
+a matched MLP and the fixed baseline MLP on sample-aligned dev/test sets.
+
 ## Random visual-token pruning control
 
 Use seeded uniform random pruning as a control for DivPrune at the same

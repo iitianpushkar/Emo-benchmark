@@ -7,6 +7,7 @@ Browse by research question. Each run keeps its notebooks, configuration, and av
 | [baselines](baselines/README.md) | Full-token Qwen baselines and alternative visual/VLM encoder comparisons. |
 | [token_pruning](token_pruning/README.md) | Projected visual-token pruning with DivPrune and random controls. |
 | [frame_pruning](frame_pruning/README.md) | Frame selection before the visual encoder, including DINO diversity and random controls. |
+| [combined_pruning](combined_pruning/README.md) | DINOv2 frame selection followed by DivPrune of projected visual tokens. |
 | [modality_ablation](modality_ablation/README.md) | Video/text contribution controls and evaluation with fixed classifiers. |
 | [conflicts](conflicts/README.md) | Emotion-mismatched utterance/video experiments and their prepared data. |
 | [fusion](fusion/README.md) | Weighted combinations of video-only and text-only embeddings. |
@@ -22,6 +23,7 @@ Browse by research question. Each run keeps its notebooks, configuration, and av
 | [tdv_dino_ibot](baselines/tdv_dino_ibot/README.md) | notebooks |
 | [qwen2_5_vl_3b_divprune_030](token_pruning/qwen2_5_vl_3b_divprune_030/README.md) | checkpoints |
 | [qwen2_5_vl_3b_dinov2_base_frames_020](frame_pruning/qwen2_5_vl_3b_dinov2_base_frames_020/README.md) | embeddings |
+| [qwen2_5_vl_3b_dinov2_050_divprune_target_015](combined_pruning/qwen2_5_vl_3b_dinov2_050_divprune_target_015/README.md) | notebook (50% frames; 15% combined visual-token target; results not yet run) |
 | [random_frames_020](frame_pruning/random_frames_020/README.md) | notebooks |
 | [alpha_0_1_frameprune_020_mlp](modality_ablation/alpha_0_1_frameprune_020_mlp/README.md) | outputs |
 | [alpha_0_both_mlps](modality_ablation/alpha_0_both_mlps/README.md) | outputs |
