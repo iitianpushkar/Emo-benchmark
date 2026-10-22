@@ -2,8 +2,8 @@
 """Build clean MELD split indexes with verified video paths.
 
 This script does not copy or modify videos. It reads MELD CSV metadata,
-constructs the expected video path for each utterance, checks whether the file
-exists, and writes a compact index CSV for downstream embedding extraction.
+constructs the expected video path for each utterance, checks whether its
+filename is present, and writes a compact index CSV for embedding extraction.
 """
 
 from __future__ import annotations
@@ -16,12 +16,14 @@ if __package__ in (None, ""):
 
 
 import argparse
+import os
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 
 LABELS = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
+INDEXER_IMPLEMENTATION = "directory_filename_listing_v1"
 
 SPLIT_LAYOUTS = {
     "train": {
@@ -117,25 +119,32 @@ def prepare_split(meld_root: Path, split: str, include_missing: bool, limit: int
         tried = [str(meld_root / item) for item in layout["video_dirs"]]
         raise FileNotFoundError(f"Could not find {split} video directory. Tried: {tried}")
 
+    print(f"[{split}] reading {csv_path}", flush=True)
     df = pd.read_csv(csv_path)
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing_columns:
         raise ValueError(f"{csv_path} is missing columns: {missing_columns}")
 
+    dialogue_ids = df["Dialogue_ID"].astype(int)
+    utterance_ids = df["Utterance_ID"].astype(int)
+    dialogue_names = dialogue_ids.astype(str)
+    utterance_names = utterance_ids.astype(str)
     out = pd.DataFrame()
-    out["sample_id"] = df.apply(
-        lambda row: f"{split}_dia{int(row['Dialogue_ID'])}_utt{int(row['Utterance_ID'])}", axis=1
-    )
+    out["sample_id"] = split + "_dia" + dialogue_names + "_utt" + utterance_names
     out["split"] = split
-    out["dialogue_id"] = df["Dialogue_ID"].astype(int)
-    out["utterance_id"] = df["Utterance_ID"].astype(int)
+    out["dialogue_id"] = dialogue_ids
+    out["utterance_id"] = utterance_ids
     out["utterance"] = df["Utterance"].map(clean_text)
     out["emotion"] = df["Emotion"].astype(str).str.lower().str.strip()
     out["emotion_id"] = out["emotion"].map({label: idx for idx, label in enumerate(LABELS)})
     out["sentiment"] = df["Sentiment"].astype(str).str.lower().str.strip() if "Sentiment" in df else ""
-    out["video_file"] = out.apply(lambda row: f"dia{row['dialogue_id']}_utt{row['utterance_id']}.mp4", axis=1)
-    out["video_path"] = out["video_file"].map(lambda name: str((video_dir / name).resolve()))
-    out["video_exists"] = out["video_path"].map(lambda path: Path(path).exists())
+    out["video_file"] = "dia" + dialogue_names + "_utt" + utterance_names + ".mp4"
+    resolved_video_dir = video_dir.resolve()
+    out["video_path"] = out["video_file"].map(lambda name: str(resolved_video_dir / name))
+    print(f"[{split}] listing video files in {video_dir}", flush=True)
+    # Kaggle mounts can make one stat/resolve per video very slow.
+    available_video_names = set(os.listdir(video_dir))
+    out["video_exists"] = out["video_file"].isin(available_video_names)
 
     if out["emotion_id"].isna().any():
         unknown = sorted(out.loc[out["emotion_id"].isna(), "emotion"].unique())
@@ -165,6 +174,7 @@ def main() -> None:
     prepared = []
 
     for split in splits:
+        print(f"[{split}] preparing index", flush=True)
         split_df = prepare_split(meld_root, split, args.include_missing, args.limit)
         prepared.append(split_df)
 
