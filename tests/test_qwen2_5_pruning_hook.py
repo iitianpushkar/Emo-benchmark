@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook
 from scripts.pruning.random_prune import build_random_prune_sequence_indices
+from scripts.pruning.uniform_prune import build_uniform_prune_sequence_indices
 
 
 class CaptureLanguageModel(torch.nn.Module):
@@ -47,6 +48,35 @@ class QwenPruningHookTests(unittest.TestCase):
         self.assertEqual(hook.retained_sequence_tokens, len(keep))
         self.assertEqual(keep[0].item(), 0)
         self.assertEqual(keep[-1].item(), 7)
+        self.assertTrue(torch.equal(actual_embeds, embeds.index_select(1, keep)))
+        self.assertTrue(torch.equal(actual_attention, attention.index_select(-1, keep)))
+        self.assertTrue(torch.equal(actual_positions, positions.index_select(-1, keep)))
+
+    def test_uniform_hook_uses_temporal_positions_and_preserves_mrope(self) -> None:
+        language_model = CaptureLanguageModel()
+        model = SimpleNamespace(
+            config=SimpleNamespace(video_token_id=99),
+            model=SimpleNamespace(language_model=language_model),
+        )
+        input_ids = torch.tensor([[1] + [99] * 8 + [2]])
+        embeds = torch.arange(10 * 4, dtype=torch.float32).reshape(1, 10, 4)
+        attention = torch.ones((1, 10), dtype=torch.long)
+        positions = torch.zeros((3, 1, 10), dtype=torch.long)
+        for index in range(8):
+            positions[0, 0, index + 1] = index // 4
+            positions[1, 0, index + 1] = (index % 4) // 2
+            positions[2, 0, index + 1] = index % 2
+        keep, selected = build_uniform_prune_sequence_indices(
+            embeds, input_ids.eq(99), positions, retain_ratio=0.5,
+        )
+
+        with DivPruneHook(model, input_ids, retain_ratio=0.5, method="uniform") as hook:
+            actual_embeds, actual_attention, actual_positions = language_model(
+                inputs_embeds=embeds, attention_mask=attention, position_ids=positions,
+            )
+
+        self.assertEqual(hook.calls, 1)
+        self.assertEqual(hook.retained_tokens, len(selected))
         self.assertTrue(torch.equal(actual_embeds, embeds.index_select(1, keep)))
         self.assertTrue(torch.equal(actual_attention, attention.index_select(-1, keep)))
         self.assertTrue(torch.equal(actual_positions, positions.index_select(-1, keep)))

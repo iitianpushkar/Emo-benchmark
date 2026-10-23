@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--retain-ratio", type=float, default=1.0,
                         help="Fraction of projected video tokens retained; 1 is unpruned")
-    parser.add_argument("--pruning", choices=("divprune", "random"), default="divprune")
+    parser.add_argument("--pruning", choices=("divprune", "random", "uniform"), default="divprune")
     parser.add_argument("--random-seed", type=int, default=42,
                         help="Base seed for sample-ID-stable random token selection")
     parser.add_argument("--profile-stride", type=int, default=0,

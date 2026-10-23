@@ -74,5 +74,8 @@ python cluster/compare_mosei_token_curves.py \
 The comparison reports the difference of validation means and the random
 variation across extraction seeds. The MLP spread is reported separately;
 MLP runs sharing one extraction are not independent extraction replicates.
+Add `--uniform-dir ../../results/qwen2_5_vl_7b_mosei_uniform_curve` to include
+the [deterministic uniform control](../qwen2_5_vl_7b_mosei_uniform_curve/README.md)
+in the same matched-budget comparison.
 After fixing the test policy, add `--test-all` to each random run to evaluate
 the held-out test set. Do not select a retention ratio using test metrics.

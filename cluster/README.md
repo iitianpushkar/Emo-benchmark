@@ -246,7 +246,7 @@ predeclared ratios on test. The curve is computationally large: each ratio
 extracts train and validation clips separately, with test clips added by
 `--test-all`. It resumes verified chunks after an interrupted job.
 
-Both launchers record measured per-clip token counts, synchronized extraction
+All MOSEI experiment launchers record measured per-clip token counts, synchronized extraction
 latency, and process GPU allocation. They estimate theoretical forward-pass
 TFLOPs with PyTorch `FlopCounterMode` on about 128 evenly spaced clips per
 split. This counts registered matrix multiplication, convolution, and attention
@@ -255,3 +255,19 @@ estimate, not a measurement of H100 hardware instructions; unsupported and
 pointwise operations may be omitted. FLOP counting uses a separate forward and
 does not enter latency measurements. See each run's `cost_summary.json` and, for DivPrune,
 `validation_curve.csv` and `.png`.
+
+## 6. Deterministic uniform-token control
+
+The [uniform-token protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_uniform_curve/README.md)
+spreads the same exact video-token budget across Qwen's temporal mRoPE
+groups and spatial positions. It shares the DivPrune ratio grid, extraction
+settings, three MLP seeds, cost measurements, checkpoints, and live logging.
+
+```bash
+python cluster/run_mosei_uniform_curve.py --root ../.. --verify-only
+python cluster/run_mosei_uniform_curve.py --root ../..
+```
+
+Outputs go to `../../results/qwen2_5_vl_7b_mosei_uniform_curve/`; follow
+`run.log` there. The uniform protocol includes a one-clip H100 smoke command
+and a comparison command for DivPrune, random, and uniform curves.

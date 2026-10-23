@@ -161,7 +161,7 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
 
 
 def main(method: str = "divprune") -> int:
-    if method not in ("divprune", "random"):
+    if method not in ("divprune", "random", "uniform"):
         raise ValueError(f"Unknown token pruning method: {method}")
     parser = argparse.ArgumentParser(description=f"Run a Qwen2.5-VL-7B {method} token-retention curve on MOSEI")
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
@@ -199,7 +199,8 @@ def main(method: str = "divprune") -> int:
     model_dir = (args.model_dir or stage_root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or stage_root / "datasets" / "mosei").expanduser().resolve()
     default_name = ("qwen2_5_vl_7b_mosei_divprune_curve" if method == "divprune"
-                    else f"qwen2_5_vl_7b_mosei_random_curve_seed{random_seed}")
+                    else (f"qwen2_5_vl_7b_mosei_random_curve_seed{random_seed}"
+                          if method == "random" else "qwen2_5_vl_7b_mosei_uniform_curve"))
     output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     model_info = verify_model(model_dir, "qwen")
@@ -238,7 +239,8 @@ def main(method: str = "divprune") -> int:
                                           "flops_profile_target_clips_per_split": FLOP_PROFILE_TARGET},
               "ratios": args.ratios, "seeds": args.seeds, "chunk_size": args.chunk_size,
               "method": ("Qwen2.5 DivPrune on projected video tokens" if method == "divprune"
-                         else "Qwen2.5 uniform random on projected video tokens"),
+                         else ("Qwen2.5 uniform random on projected video tokens"
+                               if method == "random" else "Qwen2.5 temporal-stratified uniform projected video tokens")),
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
     if method == "random":
         config["random_seed"] = random_seed
@@ -288,6 +290,8 @@ def main(method: str = "divprune") -> int:
                      "--save-every", str(args.save_every)]
                 if method == "random":
                     command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
+                elif method == "uniform":
+                    command.extend(["--pruning", "uniform"])
                 run(command, env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),

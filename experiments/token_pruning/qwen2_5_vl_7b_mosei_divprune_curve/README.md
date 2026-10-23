@@ -76,8 +76,10 @@ This reuses the train/validation artifacts, extracts test embeddings, and scores
 the saved MLP checkpoints. Report the entire test curve, seed spread, actual
 retention, and any failed samples. Do not pick a winning retention after seeing
 test scores. The matched [random-token control](../qwen2_5_vl_7b_mosei_random_curve/README.md)
-runs as separate extraction seeds and is compared on validation before any
-test claims. Neither experiment has results yet.
+runs as separate extraction seeds. The [deterministic uniform control](../qwen2_5_vl_7b_mosei_uniform_curve/README.md)
+tests temporal and spatial coverage at the same token budgets. Compare all
+three on validation before any test claims. These experiments have no MOSEI
+results yet.
 
 The earlier Kaggle Qwen2.5-VL-3B/MELD results motivated the 30% and 15% points.
 They are a different model, dataset, and label task, so they provide no MOSEI

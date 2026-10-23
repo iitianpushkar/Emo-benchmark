@@ -6,6 +6,7 @@ import torch
 
 from scripts.pruning.divprune import build_divprune_sequence_indices
 from scripts.pruning.random_prune import build_random_prune_sequence_indices
+from scripts.pruning.uniform_prune import build_uniform_prune_sequence_indices
 
 
 class DivPruneHook:
@@ -15,7 +16,7 @@ class DivPruneHook:
                  method: str = "divprune", random_seed: int | None = None):
         if not 0 < retain_ratio <= 1:
             raise ValueError("retain_ratio must be in (0, 1]")
-        if method not in ("divprune", "random"):
+        if method not in ("divprune", "random", "uniform"):
             raise ValueError(f"Unknown token pruning method: {method}")
         if method == "random" and random_seed is None:
             raise ValueError("Random token pruning requires a per-sample seed")
@@ -52,15 +53,6 @@ class DivPruneHook:
         video_mask = self.video_mask.to(embeds.device)
         if video_mask.shape != embeds.shape[:2]:
             raise ValueError("Expanded video mask does not match projected embeddings")
-        if self.method == "random":
-            keep, selected = build_random_prune_sequence_indices(
-                embeds, video_mask, self.retain_ratio, seed=self.random_seed,
-            )
-        else:
-            keep, selected = build_divprune_sequence_indices(embeds, video_mask, self.retain_ratio)
-        self.retained_tokens = int(selected.numel())
-        self.retained_sequence_tokens = int(keep.numel())
-
         mask = kwargs.get("attention_mask")
         positions = kwargs.get("position_ids")
         if not isinstance(mask, torch.Tensor) or mask.shape[-1] != embeds.shape[1]:
@@ -69,6 +61,18 @@ class DivPruneHook:
             raise ValueError("Qwen2.5 multimodal position IDs do not match the token sequence")
         if kwargs.get("cache_position") is not None:
             raise ValueError("Token pruning only supports uncached Qwen2.5 embedding extraction")
+        if self.method == "random":
+            keep, selected = build_random_prune_sequence_indices(
+                embeds, video_mask, self.retain_ratio, seed=self.random_seed,
+            )
+        elif self.method == "uniform":
+            keep, selected = build_uniform_prune_sequence_indices(
+                embeds, video_mask, positions, self.retain_ratio,
+            )
+        else:
+            keep, selected = build_divprune_sequence_indices(embeds, video_mask, self.retain_ratio)
+        self.retained_tokens = int(selected.numel())
+        self.retained_sequence_tokens = int(keep.numel())
 
         updated = dict(kwargs)
         updated["inputs_embeds"] = embeds.index_select(1, keep)
