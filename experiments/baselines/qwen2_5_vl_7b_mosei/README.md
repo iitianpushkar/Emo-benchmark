@@ -15,8 +15,8 @@ to 448 × 448, and last-layer/last-token embeddings. These shared video settings
 are defined in [`cluster/mosei_video_protocol.json`](../../../cluster/mosei_video_protocol.json)
 for all roughly 8B VLM comparisons. The saved metadata records each clip's
 actual frame count, resized dimensions, token counts, synchronized latency,
-and process GPU allocation. About five evenly spaced clips per split receive
-a separate profiled forward for partial supported-operator TFLOPs. Profiling
+and process GPU allocation. About 128 evenly spaced clips per split receive
+a separate counted forward for theoretical shape-based TFLOPs. Counting
 does not enter the latency measurement. Chunk files and final
 embeddings use separate paths for each split. Extraction must cover every
 indexed sample with no recorded errors before classification starts.

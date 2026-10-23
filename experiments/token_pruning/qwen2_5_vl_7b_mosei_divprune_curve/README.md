@@ -24,12 +24,20 @@ with seven-class MELD macro F1.
   Every ratio must have complete, aligned sample IDs; extraction failures stop
   the curve. Per-clip visual and total sequence-token counts, synchronized
   preprocessing/forward/end-to-end latency, and peak PyTorch GPU allocation
-  are recorded for each split. Every ratio profiles the same roughly five
-  evenly spaced clips per split with a separate forward. PyTorch reports
-  supported matrix-multiplication/2D-convolution TFLOPs per profiled clip;
-  fused attention and other unsupported work are excluded. The TFLOPs value
-  is a **partial estimate**, not full-model compute. This follows the
-  [PyTorch profiler's FLOP coverage](https://docs.pytorch.org/docs/stable/profiler.html).
+  are recorded for each split. Every ratio profiles the same roughly 128
+  evenly spaced clips per split with a separate forward. PyTorch's
+  `FlopCounterMode` estimates dense TFLOPs for its registered matrix
+  multiplication, convolution, and attention operations. The operator counts
+  are saved in clip metadata. This is a **theoretical forward-pass estimate**,
+  not measured H100 instructions; unsupported and pointwise work may be
+  omitted. The convention is two FLOPs per multiply-add. The counted scope
+  includes vision encoding, DivPrune selection, and the language-model forward;
+  it excludes video decoding, MLP training, and any generated tokens. Attention
+  formulas use dense shapes and can overestimate masked attention. The same
+  systematically sampled clip IDs are used at each retention level. FLOP
+  counting is excluded from the latency measurement.
+  [PyTorch's FLOP-counter formulas](https://github.com/pytorch/pytorch/blob/v2.5.1/torch/utils/flop_counter.py)
+  define the counting convention.
 - A fresh MLP is trained for each ratio with fixed hyperparameters and seeds
   42, 43, 44. Each run chooses its checkpoint by validation macro F1 at a fixed
   0.5 threshold, then calibrates per-label thresholds on validation. The main
@@ -54,8 +62,8 @@ python cluster/run_mosei_divprune_curve.py --root ../..
 
 The resumable outputs go to `../../results/qwen2_5_vl_7b_mosei_divprune_curve/`.
 The launcher records model and data hashes, Git revision, requested ratios,
-actual token counts, synchronized latency, process GPU allocation, partial
-supported-operator TFLOPs, chunk metadata, MLP checkpoints and predictions,
+actual token counts, synchronized latency, process GPU allocation, theoretical
+forward TFLOPs, chunk metadata, MLP checkpoints and predictions,
 `cost_summary.json` for each ratio, and
 `validation_curve.csv`, `.json`, and `.png`. It requires the same configuration
 when resuming; use a new `--output-dir` after changing code or inputs. A shorter

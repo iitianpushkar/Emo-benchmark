@@ -15,7 +15,7 @@ os.environ.setdefault("FORCE_QWENVL_VIDEO_READER", "decord")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
-from cluster.qwen_cost import profile_supported_flops  # noqa: E402
+from cluster.qwen_cost import profile_forward_flops  # noqa: E402
 
 
 def save(path, embeddings, ids, metadata, errors, config):
@@ -141,7 +141,7 @@ def main():
                 raise ValueError(f"Invalid embedding shape or values: {tuple(embedding.shape)}")
             flops_profile = None
             if args.profile_stride and (args.start + offset) % args.profile_stride == 0:
-                flops_profile = profile_supported_flops(model, inputs, inputs["input_ids"], args.retain_ratio)
+                flops_profile = profile_forward_flops(model, inputs, inputs["input_ids"], args.retain_ratio)
             embeddings.append(embedding)
             ids.append(sample_id)
             metadata.append({"video_path": str(video_path), "utterance": row["utterance"],

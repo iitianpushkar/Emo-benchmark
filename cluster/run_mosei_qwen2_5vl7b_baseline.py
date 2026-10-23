@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
-from cluster.qwen_cost import summarize_embedding_cost  # noqa: E402
+from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -144,7 +144,7 @@ def main() -> int:
                                     "torch": torch.__version__,
                                     "transformers": transformers.__version__,
                                     "attention": "sdpa", "batch_size": 1,
-                                    "flops_profile_target_clips_per_split": 5},
+                                    "flops_profile_target_clips_per_split": FLOP_PROFILE_TARGET},
         "chunk_size": args.chunk_size,
         "extraction": {**video_protocol, "modality_mode": "video_text",
                        "pooling": "last", "layer": -1, "save_dtype": "float32"},
@@ -168,7 +168,7 @@ def main() -> int:
 
     cost_summaries = {}
     for split, expected in SPLIT_COUNTS.items():
-        profile_stride = max(1, expected // 4)
+        profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
         chunks_dir = output_dir / "chunks" / split

@@ -136,8 +136,8 @@ python cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../.. --verify-only
 ```
 
 Install the updated requirements in the cluster environment before the GPU
-job: Qwen2.5 video processing needs `qwen-vl-utils>=0.0.14` and
-`transformers==4.57.1`, the version used to define the pruning hook's
+job: Qwen2.5 video processing needs `qwen-vl-utils>=0.0.14`,
+`torch>=2.5.1` for FLOP counting, and `transformers==4.57.1`, the version used to define the pruning hook's
 language-model boundary.
 
 The model config must identify the **Qwen2.5-VL-7B** checkpoint. A Qwen3
@@ -157,7 +157,7 @@ python cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../.. \
 
 Pass the same `--model-dir ../../models/qwen2_5_vl_7b` to the GPU command below.
 On the allocated H100, a one-clip smoke run can validate the model forward,
-DivPrune hook, and TFLOPs profiler before the full sweep:
+DivPrune hook, and TFLOPs counter before the full sweep:
 
 ```bash
 python scripts/data/prepare_mosei.py --mosei-root ../../datasets/mosei \
@@ -203,9 +203,11 @@ extracts train and validation clips separately, with test clips added by
 `--test-all`. It resumes verified chunks after an interrupted job.
 
 Both launchers record measured per-clip token counts, synchronized extraction
-latency, and process GPU allocation, plus TFLOPs per profiled clip for the
-operators supported by PyTorch's profiler. The profiler figure is a partial
-FLOP estimate, not total model FLOPs. Each split gets about five evenly spaced
-profiled clips; profiling uses a separate forward and does not enter latency
-measurements. See each run's `cost_summary.json` and, for DivPrune,
+latency, and process GPU allocation. They estimate theoretical forward-pass
+TFLOPs with PyTorch `FlopCounterMode` on about 128 evenly spaced clips per
+split. This counts registered matrix multiplication, convolution, and attention
+formulas and saves the per-operator breakdown. It is a shape-based dense FLOP
+estimate, not a measurement of H100 hardware instructions; unsupported and
+pointwise operations may be omitted. FLOP counting uses a separate forward and
+does not enter latency measurements. See each run's `cost_summary.json` and, for DivPrune,
 `validation_curve.csv` and `.png`.

@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
-from cluster.qwen_cost import summarize_embedding_cost  # noqa: E402
+from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
     verify_embeddings,
@@ -87,7 +87,8 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
             "valid_peak_total_reserved_gib_mean": split_summaries["valid"]["peak_total_reserved_gib"]["mean"],
             "valid_incremental_peak_allocated_gib_mean": split_summaries["valid"]["incremental_peak_allocated_gib"]["mean"],
             "valid_profiled_clips": split_summaries["valid"]["profiled_clips"],
-            "valid_supported_op_tflops_mean": split_summaries["valid"]["supported_op_tflops_per_profiled_clip"]["mean"],
+            "valid_theoretical_forward_tflops_mean": split_summaries["valid"]["theoretical_forward_tflops_per_profiled_clip"]["mean"],
+            "valid_theoretical_forward_tflops_sd": split_summaries["valid"]["theoretical_forward_tflops_per_profiled_clip"]["sd"],
         }
         test_reports = [folder / "test_eval" / f"seed_{seed}" / "metrics.json" for seed in seeds]
         if all(path.is_file() for path in test_reports):
@@ -130,9 +131,13 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
     axes[1, 0].plot(x, [row["valid_peak_total_allocated_gib_mean"] for row in rows], marker="o")
     axes[1, 0].set(xlabel="Measured visual-token retention (%)", ylabel="Peak allocated GiB",
                    title="Process GPU allocation, model included")
-    axes[1, 1].plot(x, [row["valid_supported_op_tflops_mean"] for row in rows], marker="o")
-    axes[1, 1].set(xlabel="Measured visual-token retention (%)", ylabel="Supported-op TFLOPs/clip",
-                   title="Profiler subset; partial FLOP coverage")
+    axes[1, 1].errorbar(
+        x, [row["valid_theoretical_forward_tflops_mean"] for row in rows],
+        yerr=[row["valid_theoretical_forward_tflops_sd"] for row in rows],
+        marker="o", capsize=3,
+    )
+    axes[1, 1].set(xlabel="Measured visual-token retention (%)", ylabel="Theoretical TFLOPs/clip",
+                   title="Shape-based forward FLOPs on profiled clips")
     for axis in axes.flat:
         axis.grid(alpha=0.25)
     figure.tight_layout()
@@ -195,7 +200,7 @@ def main() -> int:
                                           "torch": torch.__version__,
                                           "transformers": transformers.__version__,
                                           "attention": "sdpa", "batch_size": 1,
-                                          "flops_profile_target_clips_per_split": 5},
+                                          "flops_profile_target_clips_per_split": FLOP_PROFILE_TARGET},
               "ratios": args.ratios, "seeds": args.seeds, "chunk_size": args.chunk_size,
               "method": "Qwen2.5 DivPrune on projected video tokens",
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
@@ -222,7 +227,7 @@ def main() -> int:
         retention = json.loads(retention_path.read_text()) if retention_path.is_file() else {}
         for split in splits:
             expected = SPLIT_COUNTS[split]
-            profile_stride = max(1, expected // 4)
+            profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
             index = index_dir / f"mosei_{split}_index.csv"
             ids = index_ids(index, expected)
             chunks_dir = folder / "chunks" / split
