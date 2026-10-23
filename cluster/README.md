@@ -5,8 +5,9 @@ experiment. It checks access, downloads complete dataset and model snapshots,
 then verifies them from a compute node.
 
 The dataset repositories are `0xPushkar/MELD` and `0xPushkar/CMU-MOSEI`.
-The model repositories are Qwen2.5-VL-3B-Instruct, InternVL3-2B-hf,
-SmolVLM2-2.2B-Instruct, and DINOv2-base, matching the extractor defaults.
+The default preflight selects only Qwen2.5-VL-3B-Instruct for the current
+cluster test. InternVL3-2B-hf, SmolVLM2-2.2B-Instruct, and DINOv2-base remain
+available for later runs with `--models all`.
 `stage` resolves repositories it downloads to commit SHAs and writes those
 revisions to `manifest.json`. It downloads full snapshots, including model
 weights and video clips, when complete local copies are unavailable. Use a
@@ -61,12 +62,15 @@ python cluster/preflight.py stage --root /shared/project/emo-stage \
   --report preflight-stage.json
 ```
 
-`--existing-model NAME=PATH` can be repeated for `qwen`, `internvl3`,
-`smolvlm2`, and `dinov2`. An explicit model path must contain a config and
+`--existing-model NAME=PATH` can be repeated for selected models. An explicit
+model path must contain a config and
 complete weight shards; Qwen also needs its tokenizer and processor files.
 Missing models are downloaded into `models/`. If staging
 fails, no valid manifest is written. Re-running an interrupted Hub download
 can reuse Hugging Face's local metadata when the same target directory is used.
+
+To stage all model families later, use `--models all` with `probe`, `stage`,
+and `check`. To stage a subset, pass names such as `--models qwen dinov2`.
 
 The released MELD copy documented here has one missing annotated dev clip,
 `dia110_utt7.mp4`; only that specific gap is accepted. The expected annotation
@@ -85,7 +89,7 @@ python cluster/preflight.py check --root /shared/project/emo-stage \
 ```
 
 This checks all annotated video paths again through the compute-node mount,
-all four model snapshots, required Python packages, and CUDA visibility. It
+the selected model snapshot, required Python packages, and CUDA visibility. It
 does not load the models or launch an experiment. Exit code 0 and `"ready":
 true` mean the staged files and GPU are accessible from that node.
 

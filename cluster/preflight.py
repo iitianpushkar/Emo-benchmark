@@ -30,6 +30,7 @@ MODELS = (
     ("smolvlm2", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"),
     ("dinov2", "facebook/dinov2-base"),
 )
+DEFAULT_MODEL_NAMES = ("qwen",)
 MELD_COUNTS = {"train": 9989, "dev": 1109, "test": 2610}
 MOSEI_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MELD_VIDEO_DIRS = {
@@ -182,9 +183,18 @@ def hub_api():
     return HfApi(), snapshot_download
 
 
-def specs():
+def select_models(names: list[str]) -> tuple[str, ...]:
+    available = {name for name, _ in MODELS}
+    if names == ["all"]:
+        return tuple(name for name, _ in MODELS)
+    if not names or len(names) != len(set(names)) or set(names) - available:
+        raise ValueError(f"Invalid --models {names!r}; choose from {sorted(available)} or use all")
+    return tuple(name for name, _ in MODELS if name in names)
+
+
+def specs(model_names: tuple[str, ...]):
     yield from ((name, repo, "dataset") for name, repo, _ in DATASETS)
-    yield from ((name, repo, "model") for name, repo in MODELS)
+    yield from ((name, repo, "model") for name, repo in MODELS if name in model_names)
 
 
 def code_revision() -> dict:
@@ -202,10 +212,10 @@ def code_revision() -> dict:
         return {"revision": None, "dirty_tracked_files": None}
 
 
-def hub_probe() -> dict:
+def hub_probe(model_names: tuple[str, ...]) -> dict:
     api, _ = hub_api()
     result = {}
-    for name, repo, repo_type in specs():
+    for name, repo, repo_type in specs(model_names):
         try:
             info = api.repo_info(repo_id=repo, repo_type=repo_type, files_metadata=False)
             paths = [entry.rfilename for entry in (info.siblings or [])]
@@ -259,12 +269,14 @@ def environment_probe(require_gpu: bool, gpu_name: str | None = None) -> dict:
     }
 
 
-def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) -> tuple[dict, bool]:
+def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool,
+          model_names: tuple[str, ...]) -> tuple[dict, bool]:
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise ValueError(f"Missing {manifest_path}; run stage on a networked node first")
     manifest = json.loads(manifest_path.read_text())
-    report = {"stage_root": str(root), "manifest": str(manifest_path), "code": code_revision(), "data": {}, "models": {}, "environment": environment_probe(require_gpu, gpu_name)}
+    report = {"stage_root": str(root), "manifest": str(manifest_path), "selected_models": model_names,
+              "code": code_revision(), "data": {}, "models": {}, "environment": environment_probe(require_gpu, gpu_name)}
     errors = []
     staged_revision = manifest.get("code", {}).get("revision")
     current_revision = report["code"]["revision"]
@@ -276,9 +288,9 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
             report["data"][name] = verify_meld(path) if name == "meld" else verify_mosei(path)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
-    for name, _ in MODELS:
-        path = Path(manifest["snapshots"][name]["path"])
+    for name in model_names:
         try:
+            path = Path(manifest["snapshots"][name]["path"])
             report["models"][name] = verify_model(path, name)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
@@ -288,7 +300,7 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
     if missing_packages:
         errors.append(f"Missing Python packages: {missing_packages}")
     if network:
-        report["network"] = hub_probe()
+        report["network"] = hub_probe(model_names)
         if not all(item.get("accessible") and item.get("layout_ok", True) for item in report["network"].values()):
             errors.append("Direct Hub/GitHub access unavailable or a Hub repository lacks required files")
     report["errors"] = errors
@@ -297,13 +309,17 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
 
 
 def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None,
-          existing_models: dict[str, Path]) -> tuple[dict, bool]:
+          existing_models: dict[str, Path], model_names: tuple[str, ...]) -> tuple[dict, bool]:
     api, snapshot_download = hub_api()
+    unused = set(existing_models) - set(model_names)
+    if unused:
+        raise ValueError(f"Existing model paths supplied for unselected models: {sorted(unused)}")
     root.mkdir(parents=True, exist_ok=True)
     (root / "manifest.json").unlink(missing_ok=True)
-    manifest = {"created_utc": datetime.now(timezone.utc).isoformat(), "code": code_revision(), "snapshots": {}}
+    manifest = {"created_utc": datetime.now(timezone.utc).isoformat(), "code": code_revision(),
+                "selected_models": model_names, "snapshots": {}}
     validation = {}
-    for name, repo, repo_type in specs():
+    for name, repo, repo_type in specs(model_names):
         if repo_type == "dataset":
             explicit = existing_meld if name == "meld" else existing_mosei
             found = existing_dataset(name, root, explicit)
@@ -357,14 +373,17 @@ def main() -> int:
     parser.add_argument("--existing-mosei", type=Path, help="Use this complete MOSEI directory instead of downloading it")
     parser.add_argument("--existing-model", action="append", default=[], metavar="NAME=PATH",
                         help="Reuse a complete local model; repeat for qwen, internvl3, smolvlm2, dinov2")
+    parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODEL_NAMES),
+                        help="Models to probe/stage/check (default: qwen; use all for the full suite)")
     parser.add_argument("--require-gpu", action="store_true", help="Fail check if CUDA is unavailable")
     parser.add_argument("--gpu-name", help="Require a CUDA device name containing this text, e.g. H100")
     parser.add_argument("--network", action="store_true", help="Also test live Hub and GitHub access during check")
     parser.add_argument("--report", type=Path, help="Write the JSON report to this path")
     args = parser.parse_args()
     try:
+        model_names = select_models(args.models)
         if args.mode == "probe":
-            report = {"network": hub_probe(), "environment": environment_probe(False)}
+            report = {"network": hub_probe(model_names), "environment": environment_probe(False)}
             report["ready"] = all(item.get("accessible") and item.get("layout_ok", True) for item in report["network"].values())
             success = report["ready"]
         else:
@@ -372,9 +391,10 @@ def main() -> int:
                 parser.error("--root is required for stage and check")
             root = args.root.expanduser().resolve()
             report, success = (
-                stage(root, args.existing_meld, args.existing_mosei, parse_existing_models(args.existing_model))
+                stage(root, args.existing_meld, args.existing_mosei,
+                      parse_existing_models(args.existing_model), model_names)
                 if args.mode == "stage"
-                else check(root, args.require_gpu, args.gpu_name, args.network)
+                else check(root, args.require_gpu, args.gpu_name, args.network, model_names)
             )
     except Exception as exc:
         report, success = {"ready": False, "errors": [f"{type(exc).__name__}: {exc}"]}, False
