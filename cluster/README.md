@@ -51,8 +51,20 @@ python cluster/preflight.py stage --root /shared/project/emo-stage \
 
 An explicitly supplied path must pass full validation. Existing copies are
 recorded as `existing_unpinned` because local files alone do not establish a
-Hugging Face commit SHA. Downloaded snapshots are pinned to a SHA. Models are
-downloaded into `models/` and checked for config and weight files. If staging
+Hugging Face commit SHA. Downloaded snapshots are pinned to a SHA. The same
+reuse rule applies to a complete model at `models/<name>` beneath the root.
+If a model is elsewhere, specify it directly:
+
+```bash
+python cluster/preflight.py stage --root /shared/project/emo-stage \
+  --existing-model qwen=/project/rrg-basu/tirth/cvpr/models/qwen \
+  --report preflight-stage.json
+```
+
+`--existing-model NAME=PATH` can be repeated for `qwen`, `internvl3`,
+`smolvlm2`, and `dinov2`. An explicit model path must contain a config and
+complete weight shards; Qwen also needs its tokenizer and processor files.
+Missing models are downloaded into `models/`. If staging
 fails, no valid manifest is written. Re-running an interrupted Hub download
 can reuse Hugging Face's local metadata when the same target directory is used.
 

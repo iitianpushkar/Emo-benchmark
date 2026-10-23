@@ -127,18 +127,51 @@ def verify_mosei(base: Path) -> dict:
     return {"root": str(root), "splits": dict(counts), "missing_clips": 0}
 
 
-def verify_model(root: Path) -> dict:
+def verify_model(root: Path, name: str | None = None) -> dict:
     if not (root / "config.json").is_file():
         raise ValueError(f"Model config.json missing: {root}")
+    if name == "qwen":
+        required = ("model.safetensors.index.json", "preprocessor_config.json", "tokenizer_config.json")
+        absent = [filename for filename in required if not (root / filename).is_file()]
+        if absent:
+            raise ValueError(f"Qwen model files missing in {root}: {absent}")
     weights = sorted((*root.glob("*.safetensors"), *root.glob("pytorch_model*.bin")))
     if not weights:
         raise ValueError(f"Model weights missing: {root}")
+    too_small = [weight.name for weight in weights if weight.stat().st_size < 1_000_000]
+    if too_small:
+        raise ValueError(f"Incomplete weights or LFS pointers in {root}: {too_small}")
     for index in (*root.glob("*.safetensors.index.json"), *root.glob("pytorch_model*.bin.index.json")):
         shards = set(json.loads(index.read_text())["weight_map"].values())
         absent = [name for name in shards if not (root / name).is_file()]
         if absent:
             raise ValueError(f"Missing model shards in {root}: {absent[:5]}")
     return {"path": str(root), "weight_files": len(weights)}
+
+
+def existing_model(name: str, stage_root: Path, explicit: Path | None) -> tuple[Path, dict] | None:
+    candidate = explicit.expanduser().resolve() if explicit else stage_root / "models" / name
+    if not candidate.is_dir():
+        if explicit is not None:
+            raise ValueError(f"Existing {name} model directory not found: {candidate}")
+        return None
+    try:
+        return candidate.resolve(), verify_model(candidate, name)
+    except (OSError, ValueError, KeyError) as exc:
+        if explicit is not None:
+            raise ValueError(f"Existing {name} model is incomplete at {candidate}: {exc}") from exc
+        return None
+
+
+def parse_existing_models(values: list[str]) -> dict[str, Path]:
+    names = {name for name, _ in MODELS}
+    models = {}
+    for value in values:
+        name, separator, raw_path = value.partition("=")
+        if not separator or name not in names or not raw_path or name in models:
+            raise ValueError(f"Invalid --existing-model {value!r}; use NAME=PATH with NAME in {sorted(names)}")
+        models[name] = Path(raw_path)
+    return models
 
 
 def hub_api():
@@ -246,7 +279,7 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
     for name, _ in MODELS:
         path = Path(manifest["snapshots"][name]["path"])
         try:
-            report["models"][name] = verify_model(path)
+            report["models"][name] = verify_model(path, name)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
     if not report["environment"]["gpu_requirement_met"]:
@@ -263,7 +296,8 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
     return report, not errors
 
 
-def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None) -> tuple[dict, bool]:
+def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None,
+          existing_models: dict[str, Path]) -> tuple[dict, bool]:
     api, snapshot_download = hub_api()
     root.mkdir(parents=True, exist_ok=True)
     (root / "manifest.json").unlink(missing_ok=True)
@@ -281,6 +315,16 @@ def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None) -
                     "source": "existing_unpinned", "path": str(path),
                 }
                 continue
+        else:
+            found = existing_model(name, root, existing_models.get(name))
+            if found is not None:
+                path, validation[name] = found
+                print(f"Reusing complete {name} model at {path}; no download", flush=True)
+                manifest["snapshots"][name] = {
+                    "repo": repo, "repo_type": repo_type, "revision": None,
+                    "source": "existing_unpinned", "path": str(path),
+                }
+                continue
         info = api.repo_info(repo_id=repo, repo_type=repo_type)
         folder = root / ("datasets" if repo_type == "dataset" else "models") / name
         print(f"Staging {repo_type} {repo}@{info.sha} -> {folder}", flush=True)
@@ -289,7 +333,7 @@ def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None) -
             validation[name] = verify_meld(folder) if name == "meld" else verify_mosei(folder)
             path = Path(validation[name]["root"])
         else:
-            validation[name] = verify_model(folder)
+            validation[name] = verify_model(folder, name)
             path = folder.resolve()
         manifest["snapshots"][name] = {
             "repo": repo, "repo_type": repo_type, "revision": info.sha,
@@ -311,6 +355,8 @@ def main() -> int:
     parser.add_argument("--root", type=Path, help="Shared cluster directory for staged datasets, models, and manifest")
     parser.add_argument("--existing-meld", type=Path, help="Use this complete MELD directory instead of downloading it")
     parser.add_argument("--existing-mosei", type=Path, help="Use this complete MOSEI directory instead of downloading it")
+    parser.add_argument("--existing-model", action="append", default=[], metavar="NAME=PATH",
+                        help="Reuse a complete local model; repeat for qwen, internvl3, smolvlm2, dinov2")
     parser.add_argument("--require-gpu", action="store_true", help="Fail check if CUDA is unavailable")
     parser.add_argument("--gpu-name", help="Require a CUDA device name containing this text, e.g. H100")
     parser.add_argument("--network", action="store_true", help="Also test live Hub and GitHub access during check")
@@ -326,7 +372,7 @@ def main() -> int:
                 parser.error("--root is required for stage and check")
             root = args.root.expanduser().resolve()
             report, success = (
-                stage(root, args.existing_meld, args.existing_mosei)
+                stage(root, args.existing_meld, args.existing_mosei, parse_existing_models(args.existing_model))
                 if args.mode == "stage"
                 else check(root, args.require_gpu, args.gpu_name, args.network)
             )
