@@ -2,7 +2,7 @@ torch
 transformers>=4.57.1
 huggingface_hub
 accelerate
-qwen-vl-utils[decord]
+qwen-vl-utils[decord]>=0.0.14
 decord
 opencv-python
 pandas

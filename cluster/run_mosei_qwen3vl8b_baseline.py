@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full Qwen2.5-VL-7B frozen-embedding baseline on CMU-MOSEI.
+"""Run the full Qwen3-VL-8B frozen-embedding baseline on CMU-MOSEI.
 
 Submit this command inside a single-H100 allocation. It never downloads data or
 weights. Completed extraction chunks are reused when the job is restarted.
@@ -24,8 +24,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
-MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-HIDDEN_SIZE = 3584
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+HIDDEN_SIZE = 4096
 
 
 def sha256(path: Path) -> str:
@@ -99,9 +99,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
                         help="Shared parent of codes/, datasets/, models/, and results/")
-    parser.add_argument("--model-dir", type=Path, help="Local Qwen2.5-VL-7B-Instruct folder (default: ROOT/models/qwen)")
+    parser.add_argument("--model-dir", type=Path, help="Local Qwen3-VL-8B-Instruct folder (default: ROOT/models/qwen)")
     parser.add_argument("--mosei-root", type=Path, help="Local MOSEI folder (default: ROOT/datasets/mosei)")
-    parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
+    parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen3_vl_8b_mosei)")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
@@ -111,7 +111,7 @@ def main() -> int:
     root = args.root.expanduser().resolve()
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
-    output_dir = (args.output_dir or root / "results" / "qwen2_5_vl_7b_mosei").expanduser().resolve()
+    output_dir = (args.output_dir or root / "results" / "qwen3_vl_8b_mosei").expanduser().resolve()
     model = verify_model(model_dir, "qwen")
     data = verify_mosei(mosei_root)
     mosei_root = Path(data["root"]).resolve()
@@ -161,14 +161,27 @@ def main() -> int:
         ids = index_ids(index, expected)
         chunks_dir = output_dir / "chunks" / split
         embedding_pt = output_dir / "embeddings" / f"mosei_{split}.pt"
-        run([sys.executable, "-m", "scripts", "run_qwen_shared_chunks",
-             "--index-csv", str(index), "--chunks-dir", str(chunks_dir),
-             "--chunk-prefix", split, "--chunk-size", str(args.chunk_size),
-             "--model-id", str(model_dir), "--fps", "6", "--max-frames", "64",
-             "--min-frames", "4", "--frame-size", "224", "--pooling", "last",
-             "--layer", "-1", "--prompt-style", "utterance_only",
-             "--modality-mode", "video_text", "--save-dtype", "float32",
-             "--skip-existing-complete", "--retry-errors"], env)
+        for start in range(0, expected, args.chunk_size):
+            end = min(start + args.chunk_size, expected)
+            chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
+            if chunk.is_file():
+                import torch
+
+                payload = torch.load(chunk, map_location="cpu", weights_only=False)
+                expected_chunk_ids = ids[start:end]
+                if (not payload.get("errors")
+                        and len(set(payload.get("sample_ids", []))) == end - start
+                        and set(payload["sample_ids"]) == set(expected_chunk_ids)
+                        and tuple(payload["embeddings"].shape) == (end - start, HIDDEN_SIZE)
+                        and payload.get("config", {}).get("model_dir") == str(model_dir)
+                        and payload.get("config", {}).get("start") == start
+                        and payload.get("config", {}).get("limit") == end - start):
+                    print(f"Reusing complete chunk {chunk}", flush=True)
+                    continue
+            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen3vl.py"),
+                 "--index-csv", str(index), "--output-pt", str(chunk),
+                 "--model-dir", str(model_dir), "--start", str(start),
+                 "--limit", str(end - start)], env)
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
              "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
              "--pattern", f"{split}_*.pt"], env)

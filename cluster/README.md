@@ -5,7 +5,7 @@ experiment. It checks access, downloads complete dataset and model snapshots,
 then verifies them from a compute node.
 
 The dataset repositories are `0xPushkar/MELD` and `0xPushkar/CMU-MOSEI`.
-The default preflight selects only Qwen2.5-VL-7B-Instruct for the current
+The default preflight selects only Qwen3-VL-8B-Instruct for the current
 cluster test. InternVL3-2B-hf, SmolVLM2-2.2B-Instruct, and DINOv2-base remain
 available for later runs with `--models all`.
 `stage` resolves repositories it downloads to commit SHAs and writes those
@@ -119,30 +119,47 @@ a GPU node.
 Hugging Face documents [revision-pinned snapshot downloads](https://huggingface.co/docs/huggingface_hub/en/guides/download)
 and [cache/credential environment variables](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables).
 
-## 3. First experiment: Qwen2.5-VL-7B on CMU-MOSEI
+## 3. First experiment: Qwen3-VL-8B on CMU-MOSEI
 
-The first full baseline uses the local Qwen2.5-VL-7B-Instruct checkpoint and
+The first full baseline uses the local Qwen3-VL-8B-Instruct checkpoint and
 the six independent MOSEI emotion labels. Check the input paths on the login
 node before requesting an H100 job:
 
 ```bash
-python cluster/run_mosei_qwen7b_baseline.py --root ../.. --verify-only
+python cluster/run_mosei_qwen3vl8b_baseline.py --root ../.. --verify-only
 ```
 
-The model config must identify the **7B vision-language** checkpoint. A 3B
-checkpoint in `models/qwen` fails with a clear error. If the 7B checkpoint is
-elsewhere, add `--model-dir /actual/path/to/Qwen2.5-VL-7B-Instruct`.
+Install the updated requirements in the cluster environment before the GPU
+job: Qwen3 video processing needs `qwen-vl-utils>=0.0.14` and a Transformers
+version that provides `Qwen3VLForConditionalGeneration`.
+
+The model config must identify the **Qwen3-VL-8B** checkpoint. An older Qwen
+checkpoint in `models/qwen` fails with a clear error. If the 8B checkpoint is
+elsewhere, add `--model-dir /actual/path/to/Qwen3-VL-8B-Instruct`.
+If `models/qwen` holds the earlier checkpoint, stage the new one in its own
+directory on the login node:
+
+```bash
+hf download Qwen/Qwen3-VL-8B-Instruct --local-dir ../../models/qwen3_vl_8b
+python cluster/preflight.py stage --root ../.. \
+  --existing-model qwen=../../models/qwen3_vl_8b \
+  --report preflight-stage.json
+python cluster/run_mosei_qwen3vl8b_baseline.py --root ../.. \
+  --model-dir ../../models/qwen3_vl_8b --verify-only
+```
+
+Pass the same `--model-dir ../../models/qwen3_vl_8b` to the GPU command below.
 
 Inside the allocated H100 job, run one command:
 
 ```bash
-python cluster/run_mosei_qwen7b_baseline.py --root ../..
+python cluster/run_mosei_qwen3vl8b_baseline.py --root ../..
 ```
 
 This prepares train/valid/test indexes, extracts frozen video-and-transcript
 embeddings for all 22,856 clips, checks complete coverage, trains the six-output
 MLP with validation-based checkpoint and threshold selection, and evaluates
-the test split. It saves artifacts under `../../results/qwen2_5_vl_7b_mosei/`.
+the test split. It saves artifacts under `../../results/qwen3_vl_8b_mosei/`.
 The launcher uses local model files and sets offline Hub mode for child
 processes. Re-running the same command resumes extraction chunks. See the
-[baseline protocol](../experiments/baselines/qwen2_5_vl_7b_mosei/README.md).
+[baseline protocol](../experiments/baselines/qwen3_vl_8b_mosei/README.md).

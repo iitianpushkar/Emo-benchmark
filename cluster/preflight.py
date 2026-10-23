@@ -25,7 +25,7 @@ DATASETS = (
     ("mosei", "0xPushkar/CMU-MOSEI", "CMU-MOSEI"),
 )
 MODELS = (
-    ("qwen", "Qwen/Qwen2.5-VL-7B-Instruct"),
+    ("qwen", "Qwen/Qwen3-VL-8B-Instruct"),
     ("internvl3", "OpenGVLab/InternVL3-2B-hf"),
     ("smolvlm2", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"),
     ("dinov2", "facebook/dinov2-base"),
@@ -134,11 +134,13 @@ def verify_model(root: Path, name: str | None = None) -> dict:
         raise ValueError(f"Model config.json missing: {root}")
     if name == "qwen":
         config = json.loads(config_path.read_text())
-        if (config.get("model_type"), config.get("hidden_size"), config.get("num_hidden_layers")) != (
-            "qwen2_5_vl", 3584, 28
+        text_config = config.get("text_config", {})
+        if (config.get("model_type"), text_config.get("hidden_size"), text_config.get("num_hidden_layers")) != (
+            "qwen3_vl", 4096, 36
         ):
-            raise ValueError(f"Qwen checkpoint at {root} is not Qwen2.5-VL-7B-Instruct")
-        required = ("model.safetensors.index.json", "preprocessor_config.json", "tokenizer_config.json")
+            raise ValueError(f"Qwen checkpoint at {root} is not Qwen3-VL-8B-Instruct")
+        required = ("model.safetensors.index.json", "preprocessor_config.json",
+                    "video_preprocessor_config.json", "tokenizer_config.json")
         absent = [filename for filename in required if not (root / filename).is_file()]
         if absent:
             raise ValueError(f"Qwen model files missing in {root}: {absent}")
@@ -174,9 +176,12 @@ def existing_model(name: str, stage_root: Path, explicit: Path | None) -> tuple[
         if explicit is None and name == "qwen" and (candidate / "config.json").is_file():
             try:
                 config = json.loads((candidate / "config.json").read_text())
-                if config.get("model_type") == "qwen2_5_vl" and config.get("hidden_size") != 3584:
+                text_config = config.get("text_config", {})
+                if (config.get("model_type"), text_config.get("hidden_size"), text_config.get("num_hidden_layers")) != (
+                    "qwen3_vl", 4096, 36
+                ):
                     raise ValueError(
-                        f"{candidate} contains another Qwen size; choose a separate 7B directory"
+                        f"{candidate} contains another Qwen checkpoint; choose a separate Qwen3-VL-8B directory"
                     ) from exc
             except json.JSONDecodeError:
                 pass
