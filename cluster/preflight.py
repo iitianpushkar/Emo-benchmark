@@ -59,6 +59,27 @@ def dataset_root(base: Path, name: str) -> Path:
     return next((path for path in candidates if (path / marker).is_file()), base)
 
 
+def existing_dataset(name: str, stage_root: Path, explicit: Path | None) -> tuple[Path, dict] | None:
+    """Find a complete existing dataset before considering any download."""
+    base = stage_root / "datasets"
+    candidates = [explicit.expanduser().resolve()] if explicit else [base / name]
+    if explicit is None and base.is_dir():
+        candidates.extend(path for path in sorted(base.iterdir()) if path.is_dir() and path != base / name)
+    validator = verify_meld if name == "meld" else verify_mosei
+    for candidate in candidates:
+        if not candidate.is_dir():
+            if explicit is not None:
+                raise ValueError(f"Existing {name} directory not found: {candidate}")
+            continue
+        try:
+            validation = validator(candidate)
+            return Path(validation["root"]), validation
+        except (OSError, ValueError, KeyError) as exc:
+            if explicit is not None:
+                raise ValueError(f"Existing {name} dataset is incomplete at {candidate}: {exc}") from exc
+    return None
+
+
 def verify_meld(base: Path) -> dict:
     root = dataset_root(base, "meld")
     result = {"root": str(root), "splits": {}, "unexpected_missing": []}
@@ -242,21 +263,40 @@ def check(root: Path, require_gpu: bool, gpu_name: str | None, network: bool) ->
     return report, not errors
 
 
-def stage(root: Path) -> tuple[dict, bool]:
+def stage(root: Path, existing_meld: Path | None, existing_mosei: Path | None) -> tuple[dict, bool]:
     api, snapshot_download = hub_api()
     root.mkdir(parents=True, exist_ok=True)
     (root / "manifest.json").unlink(missing_ok=True)
     manifest = {"created_utc": datetime.now(timezone.utc).isoformat(), "code": code_revision(), "snapshots": {}}
+    validation = {}
     for name, repo, repo_type in specs():
+        if repo_type == "dataset":
+            explicit = existing_meld if name == "meld" else existing_mosei
+            found = existing_dataset(name, root, explicit)
+            if found is not None:
+                path, validation[name] = found
+                print(f"Reusing complete {name} dataset at {path}; no download", flush=True)
+                manifest["snapshots"][name] = {
+                    "repo": repo, "repo_type": repo_type, "revision": None,
+                    "source": "existing_unpinned", "path": str(path),
+                }
+                continue
         info = api.repo_info(repo_id=repo, repo_type=repo_type)
         folder = root / ("datasets" if repo_type == "dataset" else "models") / name
         print(f"Staging {repo_type} {repo}@{info.sha} -> {folder}", flush=True)
         snapshot_download(repo_id=repo, repo_type=repo_type, revision=info.sha, local_dir=folder)
-        manifest["snapshots"][name] = {"repo": repo, "repo_type": repo_type, "revision": info.sha, "path": str(folder.resolve())}
+        if repo_type == "dataset":
+            validation[name] = verify_meld(folder) if name == "meld" else verify_mosei(folder)
+            path = Path(validation[name]["root"])
+        else:
+            validation[name] = verify_model(folder)
+            path = folder.resolve()
+        manifest["snapshots"][name] = {
+            "repo": repo, "repo_type": repo_type, "revision": info.sha,
+            "source": "huggingface", "path": str(path),
+        }
     # A failed validation leaves the downloaded files for diagnosis, but never a
     # manifest that could make a later compute check appear successful.
-    validation = {"meld": verify_meld(root / "datasets" / "meld"), "mosei": verify_mosei(root / "datasets" / "mosei")}
-    validation.update({name: verify_model(root / "models" / name) for name, _ in MODELS})
     manifest["validation"] = validation
     path = root / "manifest.json"
     temporary = root / "manifest.json.tmp"
@@ -269,6 +309,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("probe", "stage", "check"))
     parser.add_argument("--root", type=Path, help="Shared cluster directory for staged datasets, models, and manifest")
+    parser.add_argument("--existing-meld", type=Path, help="Use this complete MELD directory instead of downloading it")
+    parser.add_argument("--existing-mosei", type=Path, help="Use this complete MOSEI directory instead of downloading it")
     parser.add_argument("--require-gpu", action="store_true", help="Fail check if CUDA is unavailable")
     parser.add_argument("--gpu-name", help="Require a CUDA device name containing this text, e.g. H100")
     parser.add_argument("--network", action="store_true", help="Also test live Hub and GitHub access during check")
@@ -283,7 +325,11 @@ def main() -> int:
             if args.root is None:
                 parser.error("--root is required for stage and check")
             root = args.root.expanduser().resolve()
-            report, success = stage(root) if args.mode == "stage" else check(root, args.require_gpu, args.gpu_name, args.network)
+            report, success = (
+                stage(root, args.existing_meld, args.existing_mosei)
+                if args.mode == "stage"
+                else check(root, args.require_gpu, args.gpu_name, args.network)
+            )
     except Exception as exc:
         report, success = {"ready": False, "errors": [f"{type(exc).__name__}: {exc}"]}, False
     output = json.dumps(report, indent=2)

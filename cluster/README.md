@@ -7,9 +7,10 @@ then verifies them from a compute node.
 The dataset repositories are `0xPushkar/MELD` and `0xPushkar/CMU-MOSEI`.
 The model repositories are Qwen2.5-VL-3B-Instruct, InternVL3-2B-hf,
 SmolVLM2-2.2B-Instruct, and DINOv2-base, matching the extractor defaults.
-`stage` resolves each repository to a commit SHA and writes those revisions to
-`manifest.json`. It downloads the full snapshots, including model weights and
-video clips. Use a shared project or scratch directory with enough space; the
+`stage` resolves repositories it downloads to commit SHAs and writes those
+revisions to `manifest.json`. It downloads full snapshots, including model
+weights and video clips, when complete local copies are unavailable. Use a
+shared project or scratch directory with enough space; the
 directory must appear at the same absolute path on login and compute nodes.
 
 ## 1. On a login or transfer node
@@ -37,10 +38,23 @@ python cluster/preflight.py stage --root /shared/project/emo-stage \
   --report preflight-stage.json
 ```
 
-`stage` downloads the full snapshots
-and verifies every annotated clip against the CSVs. It also checks model config
-and weight files. If a repository is incomplete, staging fails and no valid
-manifest is written. Re-running `stage` resumes through Hugging Face's cache.
+`stage` first checks for a complete MELD or MOSEI copy immediately under the
+chosen root's `datasets/` directory. If one exists, it verifies every
+annotated clip against the CSVs and reuses that path without downloading it.
+For a dataset elsewhere, provide its actual directory:
+
+```bash
+python cluster/preflight.py stage --root /shared/project/emo-stage \
+  --existing-meld /shared/project/datasets/MELD.Raw \
+  --report preflight-stage.json
+```
+
+An explicitly supplied path must pass full validation. Existing copies are
+recorded as `existing_unpinned` because local files alone do not establish a
+Hugging Face commit SHA. Downloaded snapshots are pinned to a SHA. Models are
+downloaded into `models/` and checked for config and weight files. If staging
+fails, no valid manifest is written. Re-running an interrupted Hub download
+can reuse Hugging Face's local metadata when the same target directory is used.
 
 The released MELD copy documented here has one missing annotated dev clip,
 `dia110_utt7.mp4`; only that specific gap is accepted. The expected annotation
@@ -77,8 +91,9 @@ inspect the report and the staged Hugging Face repository contents before
 starting GPU work. The manifest records the exact Hub revisions and the code
 commit used while staging.
 
-The staged paths are `datasets/meld`, `datasets/mosei`, and
-`models/{qwen,internvl3,smolvlm2,dinov2}` beneath the chosen root. Pass the
+By default, downloaded paths are `datasets/meld`, `datasets/mosei`, and
+`models/{qwen,internvl3,smolvlm2,dinov2}` beneath the chosen root. Existing
+dataset paths may differ; use the exact paths in `manifest.json`. Pass the
 dataset folders to `prepare_meld --meld-root` and `prepare_mosei --mosei-root`.
 Pass the model folders to extraction with `--model-id`; the frame-pruning
 encoder uses `--frame-encoder-model`. The future experiment launcher should
