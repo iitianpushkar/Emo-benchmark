@@ -14,6 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
@@ -195,6 +196,7 @@ def main() -> int:
     ):
         raise RuntimeError("The DivPrune curve requires an allocated H100 CUDA GPU")
 
+    activate_live_log(output_dir / "run.log")
     print(f"Starting DivPrune curve on {torch.cuda.get_device_name()}; "
           f"ratios={args.ratios} seeds={args.seeds} test_all={args.test_all}", flush=True)
 

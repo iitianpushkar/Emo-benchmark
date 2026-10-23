@@ -175,10 +175,15 @@ Inside the allocated H100 job, run one command:
 python cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../..
 ```
 
-The launcher streams subprocess output directly to the job's stdout/stderr;
-it creates no log file. In an interactive allocation, watch that terminal.
-For a batch job, visibility depends on the scheduler's stdout setup. The
-extractor reports model loading, each FLOP profile, clip counts, elapsed
+The launcher streams subprocess output to the job's stdout/stderr and appends
+the same output to `../../results/qwen2_5_vl_7b_mosei/run.log`. Watch the
+terminal in an interactive allocation, or follow the log from a login node:
+
+```bash
+tail -F ../../results/qwen2_5_vl_7b_mosei/run.log
+```
+
+The extractor reports model loading, each FLOP profile, clip counts, elapsed
 time, estimated remaining time, errors, and chunk saves. It reports every
 newly attempted clip by default; `--log-every 5` reduces output volume.
 Embeddings are checkpointed atomically every 25 newly attempted clips and
@@ -211,8 +216,10 @@ python cluster/run_mosei_divprune_curve.py --root ../..
 ```
 
 The sweep prints each retention ratio and split as well as per-chunk extraction
-and MLP training progress to the job's stdout. It uses the same `--log-every`
-and `--save-every` options as the baseline.
+and MLP training progress to stdout and appends it to
+`../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. Follow it with
+`tail -F ../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. It uses
+the same `--log-every` and `--save-every` options as the baseline.
 
 After inspecting the full validation curve and fixing the selection rule, run
 `python cluster/run_mosei_divprune_curve.py --root ../.. --test-all` to score all
