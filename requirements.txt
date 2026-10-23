@@ -6,6 +6,7 @@ decord
 opencv-python
 pandas
 numpy
+h5py
 scikit-learn
 tqdm
 PyYAML

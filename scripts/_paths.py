@@ -3,6 +3,10 @@ from pathlib import Path
 
 SCRIPT_PATHS = {
     "prepare_meld.py": "data/prepare_meld.py",
+    "download_mer2024.py": "data/download_mer2024.py",
+    "prepare_mer2024.py": "data/prepare_mer2024.py",
+    "export_mosei_csd.py": "data/export_mosei_csd.py",
+    "merge_mosei_labels.py": "data/merge_mosei_labels.py",
     "create_meld_conflict_dataset.py": "data/create_meld_conflict_dataset.py",
     "extract_qwen_embeddings.py": "extraction/extract_qwen_embeddings.py",
     "extract_qwen_shared_embeddings.py": "extraction/extract_qwen_shared_embeddings.py",
