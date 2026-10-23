@@ -21,3 +21,6 @@ __pycache__/
 # Local experiment caches and unfinished writes
 experiments/**/.cache/
 experiments/**/*.tmp
+
+# Cluster preflight reports
+preflight-*.json

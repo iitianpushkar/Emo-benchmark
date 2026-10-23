@@ -12,6 +12,7 @@ models and an MLP classifier, with MELD as the current dataset.
 | Find a command or reusable algorithm | [Script catalog](scripts/README.md) |
 | Reproduce extraction, pruning, training, or evaluation | [Workflow guide](docs/workflows.md) |
 | Measure token information across decoder layers | [Information Horizon guide](docs/information_horizon.md) |
+| Stage datasets/models and verify a GPU node | [Cluster preflight](cluster/README.md) |
 | Find something at its previous location | [Migration guide](docs/repository_layout.md) · [Path map](docs/repository_migration.json) |
 
 ## Layout
