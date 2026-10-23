@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full Qwen3-VL-8B frozen-embedding baseline on CMU-MOSEI.
+"""Run the full Qwen2.5-VL-7B frozen-embedding baseline on CMU-MOSEI.
 
 Submit this command inside a single-H100 allocation. It never downloads data or
 weights. Completed extraction chunks are reused when the job is restarted.
@@ -22,10 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
+from cluster.qwen_cost import summarize_embedding_cost  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
-MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
-HIDDEN_SIZE = 4096
+MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+HIDDEN_SIZE = 3584
 
 
 def sha256(path: Path) -> str:
@@ -99,9 +100,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
                         help="Shared parent of codes/, datasets/, models/, and results/")
-    parser.add_argument("--model-dir", type=Path, help="Local Qwen3-VL-8B-Instruct folder (default: ROOT/models/qwen)")
+    parser.add_argument("--model-dir", type=Path, help="Local Qwen2.5-VL-7B-Instruct folder (default: ROOT/models/qwen)")
     parser.add_argument("--mosei-root", type=Path, help="Local MOSEI folder (default: ROOT/datasets/mosei)")
-    parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen3_vl_8b_mosei)")
+    parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
@@ -112,7 +113,7 @@ def main() -> int:
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
-    output_dir = (args.output_dir or root / "results" / "qwen3_vl_8b_mosei").expanduser().resolve()
+    output_dir = (args.output_dir or root / "results" / "qwen2_5_vl_7b_mosei").expanduser().resolve()
     model = verify_model(model_dir, "qwen")
     data = verify_mosei(mosei_root)
     mosei_root = Path(data["root"]).resolve()
@@ -122,6 +123,9 @@ def main() -> int:
         return 0
 
     import torch
+    import transformers
+    if transformers.__version__ != "4.57.1":
+        raise RuntimeError("Install transformers==4.57.1 before running Qwen2.5 pruning/baseline")
 
     if not torch.cuda.is_available() or not any(
         "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
@@ -136,6 +140,11 @@ def main() -> int:
         "mosei_root": str(mosei_root),
         "aligned_csv_sha256": sha256(mosei_root / "csv" / "mosei_aligned.csv"),
         "code_revision": git_revision(),
+        "measurement_environment": {"gpu": torch.cuda.get_device_name(),
+                                    "torch": torch.__version__,
+                                    "transformers": transformers.__version__,
+                                    "attention": "sdpa", "batch_size": 1,
+                                    "flops_profile_target_clips_per_split": 5},
         "chunk_size": args.chunk_size,
         "extraction": {**video_protocol, "modality_mode": "video_text",
                        "pooling": "last", "layer": -1, "save_dtype": "float32"},
@@ -157,7 +166,9 @@ def main() -> int:
          "--mosei-root", str(mosei_root),
          "--output-dir", str(index_dir)], env)
 
+    cost_summaries = {}
     for split, expected in SPLIT_COUNTS.items():
+        profile_stride = max(1, expected // 4)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
         chunks_dir = output_dir / "chunks" / split
@@ -179,17 +190,21 @@ def main() -> int:
                         and payload.get("config", {}).get("limit") == end - start
                         and payload.get("config", {}).get("video_protocol") == video_protocol
                         and payload.get("config", {}).get("retain_ratio") == 1.0
-                        and payload.get("config", {}).get("pruning") == "none"):
+                        and payload.get("config", {}).get("pruning") == "none"
+                        and payload.get("config", {}).get("profile_stride") == profile_stride
+                        and len(payload.get("metadata", [])) == end - start):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen3vl.py"),
+            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
                  "--index-csv", str(index), "--output-pt", str(chunk),
                  "--model-dir", str(model_dir), "--start", str(start),
-                 "--limit", str(end - start)], env)
+                 "--limit", str(end - start), "--profile-stride", str(profile_stride)], env)
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
              "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
              "--pattern", f"{split}_*.pt"], env)
         verify_embeddings(embedding_pt, ids)
+        cost_summaries[split] = summarize_embedding_cost(embedding_pt, 1.0, expected)
+        (output_dir / "cost_summary.json").write_text(json.dumps(cost_summaries, indent=2) + "\n")
 
     metrics_path = output_dir / "outputs" / "metrics.json"
     if not metrics_complete(metrics_path):
@@ -203,6 +218,11 @@ def main() -> int:
              "--output-dir", str(output_dir / "outputs"), "--device", "cuda"], env)
     if not metrics_complete(metrics_path):
         raise RuntimeError(f"Classifier metrics incomplete: {metrics_path}")
+    (output_dir / "summary.json").write_text(json.dumps({
+        "model_id": MODEL_ID,
+        "performance": json.loads(metrics_path.read_text()),
+        "cost": cost_summaries,
+    }, indent=2) + "\n")
     (output_dir / "completed_utc.txt").write_text(datetime.now(timezone.utc).isoformat() + "\n")
     print(f"Full baseline complete: {metrics_path}", flush=True)
     return 0

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Run a Qwen3-VL DivPrune retention curve on MOSEI with matched MLPs."""
+"""Run a Qwen2.5-VL-7B DivPrune retention curve on MOSEI with matched MLPs."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
-import math
 import os
 import statistics
 import sys
@@ -16,7 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
-from cluster.run_mosei_qwen3vl8b_baseline import (  # noqa: E402
+from cluster.qwen_cost import summarize_embedding_cost  # noqa: E402
+from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
     verify_embeddings,
 )
@@ -33,7 +33,7 @@ def ratio_name(ratio: float) -> str:
 
 
 def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
-                   ratio: float, protocol: dict) -> bool:
+                   ratio: float, protocol: dict, profile_stride: int) -> bool:
     if not path.is_file():
         return False
     import torch
@@ -49,43 +49,17 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and config.get("model_dir") == str(model_dir)
         and config.get("start") == start and config.get("limit") == len(ids)
         and config.get("retain_ratio") == ratio
+        and config.get("profile_stride") == profile_stride
         and config.get("video_protocol") == protocol
         and len(payload.get("metadata", [])) == len(ids)
     )
-
-
-def retention_summary(path: Path, ratio: float, expected: int) -> dict:
-    import torch
-    from scripts.pruning.divprune import retained_token_count
-
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    metadata = payload["metadata"]
-    if len(metadata) != expected:
-        raise ValueError(f"{path}: retention metadata count {len(metadata)} != {expected}")
-    full = retained = 0
-    seconds = []
-    for item in metadata:
-        n = int(item["full_visual_tokens"])
-        k = int(item["retained_visual_tokens"])
-        if k != retained_token_count(n, ratio):
-            raise ValueError(f"{path}: token retention differs from requested ratio: {k}/{n}")
-        full += n
-        retained += k
-        sample_seconds = float(item["sample_seconds"])
-        if not math.isfinite(sample_seconds) or sample_seconds <= 0:
-            raise ValueError(f"{path}: invalid sample extraction time")
-        seconds.append(sample_seconds)
-    return {"samples": expected, "full_visual_tokens": full,
-            "retained_visual_tokens": retained,
-            "weighted_retention": retained / full,
-            "mean_sample_seconds": statistics.mean(seconds)}
 
 
 def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
     rows = []
     for name in names:
         folder = root / name
-        split_summaries = json.loads((folder / "retention.json").read_text())
+        split_summaries = json.loads((folder / "cost_summary.json").read_text())
         reports = [json.loads((folder / "mlp" / f"seed_{seed}" / "metrics.json").read_text())
                    for seed in seeds]
         checkpoint_f1 = [float(report["checkpoint_macro_f1_at_0.5"]) for report in reports]
@@ -97,13 +71,23 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
             "requested_retention": int(name[1:]) / 100,
             "actual_retention_train": split_summaries["train"]["weighted_retention"],
             "actual_retention_valid": split_summaries["valid"]["weighted_retention"],
+            "mean_full_visual_tokens_valid": split_summaries["valid"]["mean_full_visual_tokens_per_clip"],
+            "mean_retained_visual_tokens_valid": split_summaries["valid"]["mean_retained_visual_tokens_per_clip"],
+            "mean_retained_sequence_tokens_valid": split_summaries["valid"]["mean_retained_sequence_tokens_per_clip"],
             "valid_macro_f1_at_0.5_mean": statistics.mean(checkpoint_f1),
             "valid_macro_f1_at_0.5_sd": statistics.stdev(checkpoint_f1) if len(checkpoint_f1) > 1 else 0.0,
             "valid_tuned_macro_f1_mean": statistics.mean(tuned_f1),
             "valid_tuned_macro_f1_sd": statistics.stdev(tuned_f1) if len(tuned_f1) > 1 else 0.0,
             "valid_subset_accuracy_mean": statistics.mean(validation_accuracy),
             "valid_micro_f1_mean": statistics.mean(validation_micro_f1),
-            "mean_train_sample_seconds": split_summaries["train"]["mean_sample_seconds"],
+            "valid_mean_end_to_end_seconds": split_summaries["valid"]["latency_seconds_per_clip"]["end_to_end_seconds"]["mean"],
+            "valid_p95_end_to_end_seconds": split_summaries["valid"]["latency_seconds_per_clip"]["end_to_end_seconds"]["p95"],
+            "valid_mean_forward_seconds": split_summaries["valid"]["latency_seconds_per_clip"]["forward_seconds"]["mean"],
+            "valid_peak_total_allocated_gib_mean": split_summaries["valid"]["peak_total_allocated_gib"]["mean"],
+            "valid_peak_total_reserved_gib_mean": split_summaries["valid"]["peak_total_reserved_gib"]["mean"],
+            "valid_incremental_peak_allocated_gib_mean": split_summaries["valid"]["incremental_peak_allocated_gib"]["mean"],
+            "valid_profiled_clips": split_summaries["valid"]["profiled_clips"],
+            "valid_supported_op_tflops_mean": split_summaries["valid"]["supported_op_tflops_per_profiled_clip"]["mean"],
         }
         test_reports = [folder / "test_eval" / f"seed_{seed}" / "metrics.json" for seed in seeds]
         if all(path.is_file() for path in test_reports):
@@ -132,18 +116,24 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    figure, axes = plt.subplots(1, 2, figsize=(11, 4))
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
     x = [row["actual_retention_valid"] * 100 for row in rows]
     y = [row["valid_macro_f1_at_0.5_mean"] for row in rows]
     error = [row["valid_macro_f1_at_0.5_sd"] for row in rows]
-    axes[0].errorbar(x, y, yerr=error, marker="o", capsize=3)
-    axes[0].axhline(baseline, color="gray", linestyle="--", linewidth=1)
-    axes[0].set(xlabel="Measured visual-token retention (%)", ylabel="Validation macro F1 at 0.5",
+    axes[0, 0].errorbar(x, y, yerr=error, marker="o", capsize=3)
+    axes[0, 0].axhline(baseline, color="gray", linestyle="--", linewidth=1)
+    axes[0, 0].set(xlabel="Measured visual-token retention (%)", ylabel="Validation macro F1 at 0.5",
                 title="Matched MLP, mean ± SD across seeds")
-    axes[1].plot(x, [row["mean_train_sample_seconds"] for row in rows], marker="o")
-    axes[1].set(xlabel="Measured visual-token retention (%)", ylabel="Seconds per training clip",
-                title="End-to-end extraction time")
-    for axis in axes:
+    axes[0, 1].plot(x, [row["valid_mean_end_to_end_seconds"] for row in rows], marker="o")
+    axes[0, 1].set(xlabel="Measured visual-token retention (%)", ylabel="Seconds per validation clip",
+                   title="End-to-end extraction latency")
+    axes[1, 0].plot(x, [row["valid_peak_total_allocated_gib_mean"] for row in rows], marker="o")
+    axes[1, 0].set(xlabel="Measured visual-token retention (%)", ylabel="Peak allocated GiB",
+                   title="Process GPU allocation, model included")
+    axes[1, 1].plot(x, [row["valid_supported_op_tflops_mean"] for row in rows], marker="o")
+    axes[1, 1].set(xlabel="Measured visual-token retention (%)", ylabel="Supported-op TFLOPs/clip",
+                   title="Profiler subset; partial FLOP coverage")
+    for axis in axes.flat:
         axis.grid(alpha=0.25)
     figure.tight_layout()
     figure.savefig(root / "validation_curve.png", dpi=180)
@@ -176,7 +166,7 @@ def main() -> int:
     stage_root = args.root.expanduser().resolve()
     model_dir = (args.model_dir or stage_root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or stage_root / "datasets" / "mosei").expanduser().resolve()
-    output_dir = (args.output_dir or stage_root / "results" / "qwen3_vl_8b_mosei_divprune_curve").expanduser().resolve()
+    output_dir = (args.output_dir or stage_root / "results" / "qwen2_5_vl_7b_mosei_divprune_curve").expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     model_info = verify_model(model_dir, "qwen")
     data_info = verify_mosei(mosei_root)
@@ -187,6 +177,9 @@ def main() -> int:
         return 0
 
     import torch
+    import transformers
+    if transformers.__version__ != "4.57.1":
+        raise RuntimeError("Install transformers==4.57.1 before running Qwen2.5 pruning/baseline")
     if not torch.cuda.is_available() or not any(
         "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
     ):
@@ -198,8 +191,13 @@ def main() -> int:
               "mosei_root": str(mosei_root),
               "aligned_csv_sha256": sha256(mosei_root / "csv" / "mosei_aligned.csv"),
               "code_revision": git_revision(), "protocol": protocol,
+              "measurement_environment": {"gpu": torch.cuda.get_device_name(),
+                                          "torch": torch.__version__,
+                                          "transformers": transformers.__version__,
+                                          "attention": "sdpa", "batch_size": 1,
+                                          "flops_profile_target_clips_per_split": 5},
               "ratios": args.ratios, "seeds": args.seeds, "chunk_size": args.chunk_size,
-              "method": "Qwen3 DeepStack-aligned DivPrune on projected video tokens",
+              "method": "Qwen2.5 DivPrune on projected video tokens",
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
@@ -220,10 +218,11 @@ def main() -> int:
 
     for ratio, name in zip(args.ratios, names):
         folder = output_dir / name
-        retention_path = folder / "retention.json"
+        retention_path = folder / "cost_summary.json"
         retention = json.loads(retention_path.read_text()) if retention_path.is_file() else {}
         for split in splits:
             expected = SPLIT_COUNTS[split]
+            profile_stride = max(1, expected // 4)
             index = index_dir / f"mosei_{split}_index.csv"
             ids = index_ids(index, expected)
             chunks_dir = folder / "chunks" / split
@@ -231,18 +230,19 @@ def main() -> int:
             for start in range(0, expected, args.chunk_size):
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
-                if complete_chunk(chunk, ids[start:end], model_dir, start, ratio, protocol):
+                if complete_chunk(chunk, ids[start:end], model_dir, start, ratio, protocol, profile_stride):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-                run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen3vl.py"),
+                run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
                      "--index-csv", str(index), "--output-pt", str(chunk),
                      "--model-dir", str(model_dir), "--start", str(start),
-                     "--limit", str(end - start), "--retain-ratio", str(ratio)], env)
+                     "--limit", str(end - start), "--retain-ratio", str(ratio),
+                     "--profile-stride", str(profile_stride)], env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
                  "--pattern", f"{split}_*.pt"], env)
             verify_embeddings(embedding_pt, ids)
-            retention[split] = retention_summary(embedding_pt, ratio, expected)
+            retention[split] = summarize_embedding_cost(embedding_pt, ratio, expected)
         retention_path.write_text(json.dumps(retention, indent=2) + "\n")
 
         for seed in args.seeds:

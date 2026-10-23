@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract frozen Qwen3-VL video and transcript embeddings for one MOSEI chunk."""
+"""Extract frozen Qwen2.5-VL video/transcript embeddings and per-clip cost."""
 
 from __future__ import annotations
 
@@ -14,14 +14,15 @@ from pathlib import Path
 os.environ.setdefault("FORCE_QWENVL_VIDEO_READER", "decord")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cluster.qwen3_divprune import DivPruneHook  # noqa: E402
+from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
+from cluster.qwen_cost import profile_supported_flops  # noqa: E402
 
 
 def save(path, embeddings, ids, metadata, errors, config):
     import torch
 
     payload = {
-        "embeddings": torch.stack(embeddings) if embeddings else torch.empty((0, 4096)),
+        "embeddings": torch.stack(embeddings) if embeddings else torch.empty((0, 3584)),
         "labels": torch.zeros(len(ids), dtype=torch.long),
         "sample_ids": ids,
         "metadata": metadata,
@@ -43,9 +44,11 @@ def main():
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--retain-ratio", type=float, default=1.0,
                         help="Fraction of projected video tokens retained by DivPrune; 1 is unpruned")
+    parser.add_argument("--profile-stride", type=int, default=0,
+                        help="Profile FLOPs for global index 0 and each stride thereafter; 0 disables profiling")
     parser.add_argument("--save-every", type=int, default=25)
     args = parser.parse_args()
-    if args.start < 0 or args.limit <= 0 or args.save_every <= 0:
+    if args.start < 0 or args.limit <= 0 or args.save_every <= 0 or args.profile_stride < 0:
         parser.error("--start must be nonnegative and --limit/--save-every must be positive")
     if not 0 < args.retain_ratio <= 1:
         parser.error("--retain-ratio must be in (0, 1]")
@@ -57,14 +60,14 @@ def main():
 
     import torch
     from qwen_vl_utils import process_vision_info
-    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
               "limit": args.limit, "video_protocol": video_protocol,
               "pooling": "last_token", "layer": -1, "modality": "video_text",
               "pruning": "divprune_projected_video_tokens" if args.retain_ratio < 1 else "none",
-              "retain_ratio": args.retain_ratio}
+              "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -81,13 +84,13 @@ def main():
         print(f"Resuming {args.output_pt}: {len(ids)} embeddings", flush=True)
 
     done = set(ids)
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        str(args.model_dir), dtype=torch.bfloat16, device_map="auto", local_files_only=True,
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        str(args.model_dir), dtype=torch.bfloat16, device_map={"": 0}, local_files_only=True,
         attn_implementation="sdpa",
     ).eval()
     processor = AutoProcessor.from_pretrained(str(args.model_dir), local_files_only=True)
     processed = 0
-    for row in rows:
+    for offset, row in enumerate(rows):
         sample_id = row["sample_id"]
         if sample_id in done:
             continue
@@ -105,7 +108,7 @@ def main():
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             images, videos, video_kwargs = process_vision_info(
-                messages, image_patch_size=16, return_video_kwargs=True,
+                messages, image_patch_size=14, return_video_kwargs=True,
                 return_video_metadata=True,
             )
             videos, video_metadata = zip(*videos)
@@ -121,11 +124,24 @@ def main():
                 video_metadata=list(video_metadata), return_tensors="pt",
                 do_resize=False, **video_kwargs,
             ).to(model.device)
+            torch.cuda.synchronize(model.device)
+            preprocess_ended = time.perf_counter()
+            baseline_allocated = torch.cuda.memory_allocated(model.device)
+            torch.cuda.reset_peak_memory_stats(model.device)
+            forward_started = time.perf_counter()
             with torch.inference_mode(), DivPruneHook(model, inputs["input_ids"], args.retain_ratio) as pruning:
                 output = model.model(**inputs, use_cache=False, return_dict=True)
                 embedding = output.last_hidden_state[0, -1].float().cpu()
-            if embedding.shape != (4096,) or not torch.isfinite(embedding).all():
+            torch.cuda.synchronize(model.device)
+            forward_ended = time.perf_counter()
+            peak_allocated = torch.cuda.max_memory_allocated(model.device)
+            peak_reserved = torch.cuda.max_memory_reserved(model.device)
+            del output
+            if embedding.shape != (3584,) or not torch.isfinite(embedding).all():
                 raise ValueError(f"Invalid embedding shape or values: {tuple(embedding.shape)}")
+            flops_profile = None
+            if args.profile_stride and (args.start + offset) % args.profile_stride == 0:
+                flops_profile = profile_supported_flops(model, inputs, inputs["input_ids"], args.retain_ratio)
             embeddings.append(embedding)
             ids.append(sample_id)
             metadata.append({"video_path": str(video_path), "utterance": row["utterance"],
@@ -133,9 +149,19 @@ def main():
                              "frame_height": frame_height, "frame_width": frame_width,
                              "full_visual_tokens": pruning.full_tokens,
                              "retained_visual_tokens": pruning.retained_tokens,
+                             "full_sequence_tokens": pruning.full_sequence_tokens,
+                             "retained_sequence_tokens": pruning.retained_sequence_tokens,
                              "actual_retain_ratio": pruning.retained_tokens / pruning.full_tokens,
-                             "sample_seconds": time.perf_counter() - sample_started})
+                             "preprocess_seconds": preprocess_ended - sample_started,
+                             "forward_seconds": forward_ended - forward_started,
+                             "end_to_end_seconds": forward_ended - sample_started,
+                             "model_idle_allocated_bytes": baseline_allocated,
+                             "peak_total_allocated_bytes": peak_allocated,
+                             "peak_total_reserved_bytes": peak_reserved,
+                             "incremental_peak_allocated_bytes": max(0, peak_allocated - baseline_allocated),
+                             "flops_profile": flops_profile})
             done.add(sample_id)
+            del inputs, pruning
         except Exception as exc:
             errors.append({"sample_id": sample_id, "error": f"{type(exc).__name__}: {exc}"})
             print(f"Extraction error for {sample_id}: {exc}", flush=True)

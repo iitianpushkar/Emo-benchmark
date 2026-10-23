@@ -1,4 +1,4 @@
-# Qwen3-VL-8B DivPrune retention curve on CMU-MOSEI
+# Qwen2.5-VL-7B DivPrune retention curve on CMU-MOSEI
 
 This is a **planned, unrun** experiment. It measures token-level DivPrune at
 100, 90, 80, 70, 60, 50, 40, 30, 25, 20, 15, 10, and 5% requested retention.
@@ -9,21 +9,27 @@ with seven-class MELD macro F1.
 
 ## Fixed protocol
 
-- Local checkpoint: `Qwen/Qwen3-VL-8B-Instruct`. No model downloads occur in the
+- Local checkpoint: `Qwen/Qwen2.5-VL-7B-Instruct`. No model downloads occur in the
   GPU job. The launcher verifies the local checkpoint and complete MOSEI copy.
 - Shared [video protocol](../../../cluster/mosei_video_protocol.json): 448 × 448,
   6 FPS, 4–64 frames, segment transcript, and the same prompt and last-token
   embedding as the full baseline.
 - DivPrune selects a deterministic max-min cosine-diverse subset of the
   **projected video tokens** at the language-model boundary. It retains their
-  original multimodal position IDs and the matching DeepStack visual features.
+  original multimodal position IDs.
   Text, timestamps, and vision delimiters remain in the sequence. The vision
   encoder still runs on every input frame, so this experiment measures decoder
   token reduction rather than vision-encoder reduction.
 - Train/validation/test split indexes and targets come from `prepare_mosei.py`.
   Every ratio must have complete, aligned sample IDs; extraction failures stop
-  the curve. The weighted actual token retention and per-clip extraction time
-  are recorded for each split.
+  the curve. Per-clip visual and total sequence-token counts, synchronized
+  preprocessing/forward/end-to-end latency, and peak PyTorch GPU allocation
+  are recorded for each split. Every ratio profiles the same roughly five
+  evenly spaced clips per split with a separate forward. PyTorch reports
+  supported matrix-multiplication/2D-convolution TFLOPs per profiled clip;
+  fused attention and other unsupported work are excluded. The TFLOPs value
+  is a **partial estimate**, not full-model compute. This follows the
+  [PyTorch profiler's FLOP coverage](https://docs.pytorch.org/docs/stable/profiler.html).
 - A fresh MLP is trained for each ratio with fixed hyperparameters and seeds
   42, 43, 44. Each run chooses its checkpoint by validation macro F1 at a fixed
   0.5 threshold, then calibrates per-label thresholds on validation. The main
@@ -34,7 +40,7 @@ with seven-class MELD macro F1.
 ## Cluster commands
 
 From `codes/Emo-benchmark` on the login node, validate the already staged
-inputs. If the Qwen3 checkpoint is outside `models/qwen`, supply `--model-dir`.
+inputs. If the Qwen2.5 checkpoint is outside `models/qwen`, supply `--model-dir`.
 
 ```bash
 python cluster/run_mosei_divprune_curve.py --root ../.. --verify-only
@@ -46,9 +52,11 @@ Then submit this one command inside an allocated H100 job:
 python cluster/run_mosei_divprune_curve.py --root ../..
 ```
 
-The resumable outputs go to `../../results/qwen3_vl_8b_mosei_divprune_curve/`.
+The resumable outputs go to `../../results/qwen2_5_vl_7b_mosei_divprune_curve/`.
 The launcher records model and data hashes, Git revision, requested ratios,
-actual token counts, chunk metadata, MLP checkpoints and predictions, and
+actual token counts, synchronized latency, process GPU allocation, partial
+supported-operator TFLOPs, chunk metadata, MLP checkpoints and predictions,
+`cost_summary.json` for each ratio, and
 `validation_curve.csv`, `.json`, and `.png`. It requires the same configuration
 when resuming; use a new `--output-dir` after changing code or inputs. A shorter
 smoke sweep can be selected explicitly with `--ratios 1 .3 .05`, but it is a
