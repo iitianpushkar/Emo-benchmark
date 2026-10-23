@@ -487,7 +487,9 @@ def load_resume_payload(
     labels_tensor = payload["labels"].cpu().long()
     sample_ids = [str(item) for item in payload.get("sample_ids", [])]
     metadata = list(payload.get("metadata", [{} for _ in sample_ids]))
-    errors = list(payload.get("errors", []))
+    # Retried failures will be visited again below. Keep only errors from this
+    # attempt, otherwise a successful retry still appears as an old failure.
+    errors = [] if retry_errors else list(payload.get("errors", []))
 
     if embeddings_tensor.shape[0] != len(sample_ids):
         raise ValueError(

@@ -441,6 +441,7 @@ def existing_chunk_count(
     expected_frame_random_seed: int,
     expected_frame_encoder_model: str,
     expected_combined_target_ratio: float | None,
+    retry_errors: bool = False,
 ) -> int | None:
     if not path.exists():
         return None
@@ -489,7 +490,7 @@ def existing_chunk_count(
             f"Existing chunk {path}",
         )
         validate_combined_target_ratio(payload, expected_combined_target_ratio, f"Existing chunk {path}")
-        return len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
+        return len(payload.get("sample_ids", [])) + (0 if retry_errors else len(payload.get("errors", [])))
     except ValueError:
         raise
     except Exception:
@@ -777,6 +778,7 @@ def main() -> None:
                 args.frame_random_seed,
                 args.frame_encoder_model,
                 args.target_combined_visual_retain_ratio,
+                retry_errors=args.retry_errors,
             )
             if count is not None and count >= current_limit:
                 print(f"Skipping complete chunk {out_path} ({count}/{current_limit})")

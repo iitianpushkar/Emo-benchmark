@@ -25,7 +25,7 @@ DATASETS = (
     ("mosei", "0xPushkar/CMU-MOSEI", "CMU-MOSEI"),
 )
 MODELS = (
-    ("qwen", "Qwen/Qwen2.5-VL-3B-Instruct"),
+    ("qwen", "Qwen/Qwen2.5-VL-7B-Instruct"),
     ("internvl3", "OpenGVLab/InternVL3-2B-hf"),
     ("smolvlm2", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"),
     ("dinov2", "facebook/dinov2-base"),
@@ -129,9 +129,15 @@ def verify_mosei(base: Path) -> dict:
 
 
 def verify_model(root: Path, name: str | None = None) -> dict:
-    if not (root / "config.json").is_file():
+    config_path = root / "config.json"
+    if not config_path.is_file():
         raise ValueError(f"Model config.json missing: {root}")
     if name == "qwen":
+        config = json.loads(config_path.read_text())
+        if (config.get("model_type"), config.get("hidden_size"), config.get("num_hidden_layers")) != (
+            "qwen2_5_vl", 3584, 28
+        ):
+            raise ValueError(f"Qwen checkpoint at {root} is not Qwen2.5-VL-7B-Instruct")
         required = ("model.safetensors.index.json", "preprocessor_config.json", "tokenizer_config.json")
         absent = [filename for filename in required if not (root / filename).is_file()]
         if absent:
@@ -143,10 +149,16 @@ def verify_model(root: Path, name: str | None = None) -> dict:
     if too_small:
         raise ValueError(f"Incomplete weights or LFS pointers in {root}: {too_small}")
     for index in (*root.glob("*.safetensors.index.json"), *root.glob("pytorch_model*.bin.index.json")):
-        shards = set(json.loads(index.read_text())["weight_map"].values())
+        index_data = json.loads(index.read_text())
+        shards = set(index_data["weight_map"].values())
         absent = [name for name in shards if not (root / name).is_file()]
         if absent:
             raise ValueError(f"Missing model shards in {root}: {absent[:5]}")
+        if name == "qwen":
+            expected_bytes = index_data.get("metadata", {}).get("total_size")
+            actual_bytes = sum((root / shard).stat().st_size for shard in shards)
+            if expected_bytes and actual_bytes < expected_bytes:
+                raise ValueError(f"Qwen weight shards are truncated in {root}: {actual_bytes} < {expected_bytes} bytes")
     return {"path": str(root), "weight_files": len(weights)}
 
 
@@ -159,6 +171,15 @@ def existing_model(name: str, stage_root: Path, explicit: Path | None) -> tuple[
     try:
         return candidate.resolve(), verify_model(candidate, name)
     except (OSError, ValueError, KeyError) as exc:
+        if explicit is None and name == "qwen" and (candidate / "config.json").is_file():
+            try:
+                config = json.loads((candidate / "config.json").read_text())
+                if config.get("model_type") == "qwen2_5_vl" and config.get("hidden_size") != 3584:
+                    raise ValueError(
+                        f"{candidate} contains another Qwen size; choose a separate 7B directory"
+                    ) from exc
+            except json.JSONDecodeError:
+                pass
         if explicit is not None:
             raise ValueError(f"Existing {name} model is incomplete at {candidate}: {exc}") from exc
         return None
