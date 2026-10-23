@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
 import os
+import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("FORCE_QWENVL_VIDEO_READER", "decord")
@@ -16,6 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
 from cluster.qwen_cost import profile_forward_flops  # noqa: E402
+
+
+def log(message: str) -> None:
+    print(f"[{datetime.now(timezone.utc).isoformat()}] {message}", flush=True)
 
 
 def save(path, embeddings, ids, metadata, errors, config):
@@ -47,9 +54,12 @@ def main():
     parser.add_argument("--profile-stride", type=int, default=0,
                         help="Profile FLOPs for global index 0 and each stride thereafter; 0 disables profiling")
     parser.add_argument("--save-every", type=int, default=25)
+    parser.add_argument("--log-every", type=int, default=1,
+                        help="Print clip progress every N new attempts (default: 1)")
     args = parser.parse_args()
-    if args.start < 0 or args.limit <= 0 or args.save_every <= 0 or args.profile_stride < 0:
-        parser.error("--start must be nonnegative and --limit/--save-every must be positive")
+    if (args.start < 0 or args.limit <= 0 or args.save_every <= 0
+            or args.log_every <= 0 or args.profile_stride < 0):
+        parser.error("--start must be nonnegative and --limit/--save-every/--log-every must be positive")
     if not 0 < args.retain_ratio <= 1:
         parser.error("--retain-ratio must be in (0, 1]")
 
@@ -58,6 +68,8 @@ def main():
     if len(rows) != args.limit:
         raise ValueError(f"Expected {args.limit} index rows at offset {args.start}, found {len(rows)}")
 
+    log(f"Starting extraction: index={args.index_csv} rows={args.start}:{args.start + args.limit} "
+        f"retention={args.retain_ratio:.0%} output={args.output_pt}")
     import torch
     from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -81,15 +93,34 @@ def main():
         expected_ids = {row["sample_id"] for row in rows}
         if len(set(ids)) != len(ids) or not set(ids) <= expected_ids:
             raise ValueError(f"Existing chunk has unexpected or repeated IDs: {args.output_pt}")
-        print(f"Resuming {args.output_pt}: {len(ids)} embeddings", flush=True)
+        log(f"Resuming {args.output_pt}: {len(ids)} embeddings already saved")
 
     done = set(ids)
+    saved_state = [len(ids), len(errors)]
+
+    def checkpoint_on_exit() -> None:
+        complete = min(len(embeddings), len(ids), len(metadata))
+        if (complete, len(errors)) != tuple(saved_state):
+            save(args.output_pt, embeddings[:complete], ids[:complete],
+                 metadata[:complete], errors, config)
+            log(f"Interrupted: saved {complete}/{len(rows)} embeddings to {args.output_pt}")
+
+    def stop_on_sigterm(signum, _frame) -> None:
+        raise SystemExit(128 + signum)
+
+    atexit.register(checkpoint_on_exit)
+    previous_sigterm = signal.signal(signal.SIGTERM, stop_on_sigterm)
+    log(f"Loading Qwen2.5-VL-7B from {args.model_dir}")
+    load_started = time.perf_counter()
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         str(args.model_dir), dtype=torch.bfloat16, device_map={"": 0}, local_files_only=True,
         attn_implementation="sdpa",
     ).eval()
     processor = AutoProcessor.from_pretrained(str(args.model_dir), local_files_only=True)
+    log(f"Model and processor ready in {time.perf_counter() - load_started:.1f}s; "
+        f"GPU={torch.cuda.get_device_name(model.device)}")
     processed = 0
+    extraction_started = time.perf_counter()
     for offset, row in enumerate(rows):
         sample_id = row["sample_id"]
         if sample_id in done:
@@ -141,7 +172,10 @@ def main():
                 raise ValueError(f"Invalid embedding shape or values: {tuple(embedding.shape)}")
             flops_profile = None
             if args.profile_stride and (args.start + offset) % args.profile_stride == 0:
+                log(f"Profiling theoretical forward FLOPs for {sample_id} "
+                    f"(global row {args.start + offset})")
                 flops_profile = profile_forward_flops(model, inputs, inputs["input_ids"], args.retain_ratio)
+                log(f"FLOP profile complete for {sample_id}")
             embeddings.append(embedding)
             ids.append(sample_id)
             metadata.append({"video_path": str(video_path), "utterance": row["utterance"],
@@ -164,12 +198,25 @@ def main():
             del inputs, pruning
         except Exception as exc:
             errors.append({"sample_id": sample_id, "error": f"{type(exc).__name__}: {exc}"})
-            print(f"Extraction error for {sample_id}: {exc}", flush=True)
+            log(f"Extraction error for {sample_id}: {type(exc).__name__}: {exc}")
         processed += 1
+        if processed % args.log_every == 0 or len(done) == len(rows):
+            elapsed = time.perf_counter() - extraction_started
+            rate = processed / elapsed if elapsed else 0.0
+            remaining = max(0, len(rows) - len(done) - len(errors))
+            eta = remaining / rate if rate else float("inf")
+            log(f"Progress {len(done)}/{len(rows)} embeddings; "
+                f"new_attempts={processed} errors={len(errors)} last={sample_id} "
+                f"elapsed={elapsed:.1f}s rate={rate:.3f} clips/s ETA={eta:.0f}s")
         if processed % args.save_every == 0:
             save(args.output_pt, embeddings, ids, metadata, errors, config)
-            print(f"Saved {len(ids)}/{len(rows)} embeddings in {args.output_pt}", flush=True)
+            saved_state[:] = [len(ids), len(errors)]
+            log(f"Checkpoint saved: {len(ids)}/{len(rows)} embeddings in {args.output_pt}")
     save(args.output_pt, embeddings, ids, metadata, errors, config)
+    saved_state[:] = [len(ids), len(errors)]
+    atexit.unregister(checkpoint_on_exit)
+    signal.signal(signal.SIGTERM, previous_sigterm)
+    log(f"Final chunk saved: {len(ids)}/{len(rows)} embeddings; errors={len(errors)}")
     if errors:
         raise RuntimeError(f"{len(errors)} extraction errors in {args.output_pt}; first: {errors[:3]}")
     if len(ids) != len(rows):

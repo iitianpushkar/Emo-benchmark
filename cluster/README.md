@@ -175,6 +175,20 @@ Inside the allocated H100 job, run one command:
 python cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../..
 ```
 
+The launcher streams subprocess output directly to the job's stdout/stderr;
+it creates no log file. In an interactive allocation, watch that terminal.
+For a batch job, visibility depends on the scheduler's stdout setup. The
+extractor reports model loading, each FLOP profile, clip counts, elapsed
+time, estimated remaining time, errors, and chunk saves. It reports every
+newly attempted clip by default; `--log-every 5` reduces output volume.
+Embeddings are checkpointed atomically every 25 newly attempted clips and
+at normal chunk completion. Pass `--save-every 5` to reduce the maximum
+unsaved progress between checkpoints to four clips. On normal interruption
+(Ctrl-C or a scheduler SIGTERM), the extractor also saves completed clips
+before exiting. A forced SIGKILL or node failure leaves the last periodic
+checkpoint. A restart reuses verified complete chunks and resumes incomplete
+chunks from saved sample IDs.
+
 This prepares train/valid/test indexes, extracts frozen video-and-transcript
 embeddings for all 22,856 clips, checks complete coverage, trains the six-output
 MLP with validation-based checkpoint and threshold selection, and evaluates
@@ -195,6 +209,10 @@ the login node, then submit the GPU command inside an H100 allocation:
 python cluster/run_mosei_divprune_curve.py --root ../.. --verify-only
 python cluster/run_mosei_divprune_curve.py --root ../..
 ```
+
+The sweep prints each retention ratio and split as well as per-chunk extraction
+and MLP training progress to the job's stdout. It uses the same `--log-every`
+and `--save-every` options as the baseline.
 
 After inspecting the full validation curve and fixing the selection rule, run
 `python cluster/run_mosei_divprune_curve.py --root ../.. --test-all` to score all

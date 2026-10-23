@@ -155,12 +155,17 @@ def main() -> int:
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
     parser.add_argument("--chunk-size", type=int, default=500)
+    parser.add_argument("--log-every", type=int, default=1,
+                        help="Print extraction progress every N new clips")
+    parser.add_argument("--save-every", type=int, default=25,
+                        help="Checkpoint embeddings every N new clips")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--test-all", action="store_true",
                         help="After the validation curve is fixed, evaluate every ratio on test")
     args = parser.parse_args()
-    if args.chunk_size <= 0 or not args.seeds or len(set(args.seeds)) != len(args.seeds):
-        parser.error("Chunk size must be positive and at least one unique seed is required")
+    if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0 or not args.seeds
+            or len(set(args.seeds)) != len(args.seeds)):
+        parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
     try:
         names = [ratio_name(ratio) for ratio in args.ratios]
     except ValueError as exc:
@@ -189,6 +194,9 @@ def main() -> int:
         "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
     ):
         raise RuntimeError("The DivPrune curve requires an allocated H100 CUDA GPU")
+
+    print(f"Starting DivPrune curve on {torch.cuda.get_device_name()}; "
+          f"ratios={args.ratios} seeds={args.seeds} test_all={args.test_all}", flush=True)
 
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
               "model_config_sha256": sha256(model_dir / "config.json"),
@@ -222,10 +230,12 @@ def main() -> int:
     splits = ("train", "valid", "test") if args.test_all else ("train", "valid")
 
     for ratio, name in zip(args.ratios, names):
+        print(f"[{name}] Starting retention ratio {ratio:.0%}", flush=True)
         folder = output_dir / name
         retention_path = folder / "cost_summary.json"
         retention = json.loads(retention_path.read_text()) if retention_path.is_file() else {}
         for split in splits:
+            print(f"[{name}] Starting {split} split ({SPLIT_COUNTS[split]} clips)", flush=True)
             expected = SPLIT_COUNTS[split]
             profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
             index = index_dir / f"mosei_{split}_index.csv"
@@ -242,13 +252,16 @@ def main() -> int:
                      "--index-csv", str(index), "--output-pt", str(chunk),
                      "--model-dir", str(model_dir), "--start", str(start),
                      "--limit", str(end - start), "--retain-ratio", str(ratio),
-                     "--profile-stride", str(profile_stride)], env)
+                     "--profile-stride", str(profile_stride),
+                     "--log-every", str(args.log_every),
+                     "--save-every", str(args.save_every)], env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
                  "--pattern", f"{split}_*.pt"], env)
             verify_embeddings(embedding_pt, ids)
             retention[split] = summarize_embedding_cost(embedding_pt, ratio, expected)
         retention_path.write_text(json.dumps(retention, indent=2) + "\n")
+        print(f"[{name}] Extraction and cost summaries complete", flush=True)
 
         for seed in args.seeds:
             mlp_dir = folder / "mlp" / f"seed_{seed}"
@@ -276,6 +289,7 @@ def main() -> int:
                          "--index", str(index_dir / "mosei_test_index.csv"),
                          "--output-dir", str(test_dir), "--device", "cuda"], env)
     write_curve(output_dir, names, tuple(args.seeds))
+    print(f"DivPrune curve complete: {output_dir / 'validation_curve.csv'}", flush=True)
     return 0
 
 

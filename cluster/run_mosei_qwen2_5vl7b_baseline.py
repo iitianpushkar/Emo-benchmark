@@ -15,6 +15,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,8 +49,20 @@ def git_revision() -> str | None:
 
 
 def run(command: list[str], env: dict[str, str]) -> None:
-    print("+", shlex.join(command), flush=True)
-    subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
+    started = time.monotonic()
+    print(f"[{datetime.now(timezone.utc).isoformat()}] + {shlex.join(command)}", flush=True)
+    child_env = {**env, "PYTHONUNBUFFERED": "1"}
+    with subprocess.Popen(command, cwd=REPO_ROOT, env=child_env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          bufsize=1) as process:
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+        returncode = process.wait()
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Command finished: "
+          f"exit={returncode} elapsed={time.monotonic() - started:.1f}s", flush=True)
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def index_ids(path: Path, expected: int) -> list[str]:
@@ -104,10 +117,14 @@ def main() -> int:
     parser.add_argument("--mosei-root", type=Path, help="Local MOSEI folder (default: ROOT/datasets/mosei)")
     parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
     parser.add_argument("--chunk-size", type=int, default=500)
+    parser.add_argument("--log-every", type=int, default=1,
+                        help="Print extraction progress every N new clips")
+    parser.add_argument("--save-every", type=int, default=25,
+                        help="Checkpoint embeddings every N new clips")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
-    if args.chunk_size <= 0:
-        parser.error("--chunk-size must be positive")
+    if args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0:
+        parser.error("--chunk-size, --log-every, and --save-every must be positive")
 
     root = args.root.expanduser().resolve()
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
@@ -131,6 +148,8 @@ def main() -> int:
         "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
     ):
         raise RuntimeError("This full baseline requires an allocated H100 CUDA GPU")
+
+    print(f"Starting Qwen2.5-VL-7B MOSEI baseline on {torch.cuda.get_device_name()}", flush=True)
 
     config = {
         "model_id": MODEL_ID,
@@ -198,7 +217,9 @@ def main() -> int:
             run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
                  "--index-csv", str(index), "--output-pt", str(chunk),
                  "--model-dir", str(model_dir), "--start", str(start),
-                 "--limit", str(end - start), "--profile-stride", str(profile_stride)], env)
+                 "--limit", str(end - start), "--profile-stride", str(profile_stride),
+                 "--log-every", str(args.log_every),
+                 "--save-every", str(args.save_every)], env)
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
              "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
              "--pattern", f"{split}_*.pt"], env)
