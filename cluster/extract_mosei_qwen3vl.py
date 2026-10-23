@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 from pathlib import Path
 
@@ -49,10 +50,10 @@ def main():
     from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
+    video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
-              "limit": args.limit, "fps": 6, "min_frames": 4, "max_frames": 64,
-              "frame_size": 224, "pooling": "last_token", "layer": -1,
-              "prompt": "utterance_only", "modality": "video_text"}
+              "limit": args.limit, "video_protocol": video_protocol,
+              "pooling": "last_token", "layer": -1, "modality": "video_text"}
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -84,9 +85,10 @@ def main():
             if not video_path.is_file():
                 raise FileNotFoundError(video_path)
             messages = [{"role": "user", "content": [
-                {"type": "video", "video": video_path.as_uri(), "fps": 6,
-                 "min_frames": 4, "max_frames": 64,
-                 "resized_height": 224, "resized_width": 224},
+                {"type": "video", "video": video_path.as_uri(), "fps": video_protocol["fps"],
+                 "min_frames": video_protocol["min_frames"], "max_frames": video_protocol["max_frames"],
+                 "resized_height": video_protocol["frame_size"],
+                 "resized_width": video_protocol["frame_size"]},
                 {"type": "text", "text": row["utterance"]},
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -95,6 +97,13 @@ def main():
                 return_video_metadata=True,
             )
             videos, video_metadata = zip(*videos)
+            frame_count = int(videos[0].shape[0])
+            frame_height, frame_width = map(int, videos[0].shape[-2:])
+            if (frame_height, frame_width) != (video_protocol["frame_size"],) * 2:
+                raise ValueError(
+                    f"Actual frame size {(frame_height, frame_width)} differs from "
+                    f"shared protocol {video_protocol['frame_size']} square"
+                )
             inputs = processor(
                 text=[prompt], images=images, videos=list(videos),
                 video_metadata=list(video_metadata), return_tensors="pt",
@@ -107,7 +116,9 @@ def main():
                 raise ValueError(f"Invalid embedding shape or values: {tuple(embedding.shape)}")
             embeddings.append(embedding)
             ids.append(sample_id)
-            metadata.append({"video_path": str(video_path), "utterance": row["utterance"]})
+            metadata.append({"video_path": str(video_path), "utterance": row["utterance"],
+                             "frame_count": frame_count,
+                             "frame_height": frame_height, "frame_width": frame_width})
             done.add(sample_id)
         except Exception as exc:
             errors.append({"sample_id": sample_id, "error": f"{type(exc).__name__}: {exc}"})

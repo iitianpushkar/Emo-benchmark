@@ -109,6 +109,7 @@ def main() -> int:
         parser.error("--chunk-size must be positive")
 
     root = args.root.expanduser().resolve()
+    video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
     output_dir = (args.output_dir or root / "results" / "qwen3_vl_8b_mosei").expanduser().resolve()
@@ -116,7 +117,8 @@ def main() -> int:
     data = verify_mosei(mosei_root)
     mosei_root = Path(data["root"]).resolve()
     if args.verify_only:
-        print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data}, indent=2))
+        print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,
+                          "video_protocol": video_protocol}, indent=2))
         return 0
 
     import torch
@@ -135,8 +137,7 @@ def main() -> int:
         "aligned_csv_sha256": sha256(mosei_root / "csv" / "mosei_aligned.csv"),
         "code_revision": git_revision(),
         "chunk_size": args.chunk_size,
-        "extraction": {"fps": 6, "max_frames": 64, "min_frames": 4, "frame_size": 224,
-                       "prompt_style": "utterance_only", "modality_mode": "video_text",
+        "extraction": {**video_protocol, "modality_mode": "video_text",
                        "pooling": "last", "layer": -1, "save_dtype": "float32"},
         "target": "six independent binary emotions; positive iff score > 0",
     }
@@ -175,7 +176,8 @@ def main() -> int:
                         and tuple(payload["embeddings"].shape) == (end - start, HIDDEN_SIZE)
                         and payload.get("config", {}).get("model_dir") == str(model_dir)
                         and payload.get("config", {}).get("start") == start
-                        and payload.get("config", {}).get("limit") == end - start):
+                        and payload.get("config", {}).get("limit") == end - start
+                        and payload.get("config", {}).get("video_protocol") == video_protocol):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
             run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen3vl.py"),

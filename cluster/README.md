@@ -125,6 +125,12 @@ The first full baseline uses the local Qwen3-VL-8B-Instruct checkpoint and
 the six independent MOSEI emotion labels. Check the input paths on the login
 node before requesting an H100 job:
 
+The shared [MOSEI video protocol](mosei_video_protocol.json) specifies
+448 × 448 frames, 6 FPS, and 4–64 frames per clip for the size-matched VLM
+comparisons. Each model should receive the same segment transcript and use the
+same train/valid/test indexes and six-label classifier procedure. The Qwen3
+extractor records actual frame dimensions and counts in its metadata.
+
 ```bash
 python cluster/run_mosei_qwen3vl8b_baseline.py --root ../.. --verify-only
 ```
