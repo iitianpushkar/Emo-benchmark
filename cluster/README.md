@@ -221,6 +221,25 @@ and MLP training progress to stdout and appends it to
 `tail -F ../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. It uses
 the same `--log-every` and `--save-every` options as the baseline.
 
+## 5. Matched random-token control
+
+The [random-token protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_random_curve/README.md)
+uses the same ratio grid, Qwen checkpoint, video settings, measured costs,
+and matched MLP seeds as DivPrune. For paper-level variation estimates, run
+three independent extraction seeds in separate H100 jobs:
+
+```bash
+python cluster/run_mosei_random_curve.py --root ../.. --verify-only
+python cluster/run_mosei_random_curve.py --root ../.. --random-seed 42
+python cluster/run_mosei_random_curve.py --root ../.. --random-seed 43
+python cluster/run_mosei_random_curve.py --root ../.. --random-seed 44
+```
+
+Each seed writes to its own `../../results/qwen2_5_vl_7b_mosei_random_curve_seedN/`
+directory and appends live output to `run.log`. Use the comparison command in
+the random-token protocol after the DivPrune and random validation curves
+finish. Like DivPrune, test evaluation is a separate `--test-all` pass.
+
 After inspecting the full validation curve and fixing the selection rule, run
 `python cluster/run_mosei_divprune_curve.py --root ../.. --test-all` to score all
 predeclared ratios on test. The curve is computationally large: each ratio

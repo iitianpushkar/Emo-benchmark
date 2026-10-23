@@ -9,7 +9,8 @@ from pathlib import Path
 FLOP_PROFILE_TARGET = 128
 
 
-def profile_forward_flops(model, inputs, input_ids, retain_ratio: float) -> dict:
+def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
+                          method: str = "divprune", random_seed: int | None = None) -> dict:
     """Count theoretical FLOPs on a separate, identically configured forward."""
     import torch
     try:
@@ -21,7 +22,8 @@ def profile_forward_flops(model, inputs, input_ids, retain_ratio: float) -> dict
 
     torch.cuda.synchronize(model.device)
     with torch.inference_mode(), FlopCounterMode(display=False) as counter:
-        with DivPruneHook(model, input_ids, retain_ratio):
+        with DivPruneHook(model, input_ids, retain_ratio, method=method,
+                          random_seed=random_seed):
             output = model.model(**inputs, use_cache=False, return_dict=True)
             _ = output.last_hidden_state[0, -1].float().cpu()
         torch.cuda.synchronize(model.device)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a Qwen2.5-VL-7B DivPrune retention curve on MOSEI with matched MLPs."""
+"""Run Qwen2.5-VL-7B visual-token retention curves on MOSEI."""
 
 from __future__ import annotations
 
@@ -34,14 +34,18 @@ def ratio_name(ratio: float) -> str:
 
 
 def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
-                   ratio: float, protocol: dict, profile_stride: int) -> bool:
+                   ratio: float, protocol: dict, profile_stride: int,
+                   method: str = "divprune", random_seed: int | None = None) -> bool:
     if not path.is_file():
         return False
     import torch
+    if method == "random":
+        from scripts.pruning.random_prune import sample_seed
 
     payload = torch.load(path, map_location="cpu", weights_only=False)
     saved_ids = [str(value) for value in payload.get("sample_ids", [])]
     config = payload.get("config", {})
+    expected_pruning = f"{method}_projected_video_tokens" if ratio < 1 else "none"
     return (
         not payload.get("errors") and len(saved_ids) == len(ids)
         and len(set(saved_ids)) == len(ids) and set(saved_ids) == set(ids)
@@ -50,13 +54,20 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and config.get("model_dir") == str(model_dir)
         and config.get("start") == start and config.get("limit") == len(ids)
         and config.get("retain_ratio") == ratio
+        and config.get("pruning") == expected_pruning
+        and config.get("random_seed") == random_seed
         and config.get("profile_stride") == profile_stride
         and config.get("video_protocol") == protocol
         and len(payload.get("metadata", [])) == len(ids)
+        and (method != "random" or all(
+            item.get("random_prune_sample_seed") == sample_seed(random_seed, sample_id)
+            for sample_id, item in zip(saved_ids, payload["metadata"])
+        ))
     )
 
 
-def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
+def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
+                method: str = "divprune", random_seed: int | None = None) -> None:
     rows = []
     for name in names:
         folder = root / name
@@ -68,6 +79,8 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
         validation_accuracy = [float(report["validation"]["subset_accuracy"]) for report in reports]
         validation_micro_f1 = [float(report["validation"]["micro_f1"]) for report in reports]
         row = {
+            "method": method,
+            "extraction_seed": random_seed,
             "condition": name,
             "requested_retention": int(name[1:]) / 100,
             "actual_retention_train": split_summaries["train"]["weighted_retention"],
@@ -147,14 +160,19 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...]) -> None:
     print(f"Wrote {root / 'validation_curve.csv'} and validation_curve.png", flush=True)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(method: str = "divprune") -> int:
+    if method not in ("divprune", "random"):
+        raise ValueError(f"Unknown token pruning method: {method}")
+    parser = argparse.ArgumentParser(description=f"Run a Qwen2.5-VL-7B {method} token-retention curve on MOSEI")
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--mosei-root", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
+    if method == "random":
+        parser.add_argument("--random-seed", type=int, default=42,
+                            help="Base seed for deterministic per-sample token selection")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=1,
                         help="Print extraction progress every N new clips")
@@ -164,9 +182,12 @@ def main() -> int:
     parser.add_argument("--test-all", action="store_true",
                         help="After the validation curve is fixed, evaluate every ratio on test")
     args = parser.parse_args()
+    random_seed = args.random_seed if method == "random" else None
     if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0 or not args.seeds
             or len(set(args.seeds)) != len(args.seeds)):
         parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
+    if random_seed is not None and random_seed < 0:
+        parser.error("--random-seed must be nonnegative")
     try:
         names = [ratio_name(ratio) for ratio in args.ratios]
     except ValueError as exc:
@@ -177,13 +198,16 @@ def main() -> int:
     stage_root = args.root.expanduser().resolve()
     model_dir = (args.model_dir or stage_root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or stage_root / "datasets" / "mosei").expanduser().resolve()
-    output_dir = (args.output_dir or stage_root / "results" / "qwen2_5_vl_7b_mosei_divprune_curve").expanduser().resolve()
+    default_name = ("qwen2_5_vl_7b_mosei_divprune_curve" if method == "divprune"
+                    else f"qwen2_5_vl_7b_mosei_random_curve_seed{random_seed}")
+    output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     model_info = verify_model(model_dir, "qwen")
     data_info = verify_mosei(mosei_root)
     mosei_root = Path(data_info["root"]).resolve()
     if args.verify_only:
         print(json.dumps({"model": model_info, "data": data_info, "protocol": protocol,
+                          "method": method, "random_seed": random_seed,
                           "ratios": args.ratios, "seeds": args.seeds}, indent=2))
         return 0
 
@@ -194,11 +218,12 @@ def main() -> int:
     if not torch.cuda.is_available() or not any(
         "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
     ):
-        raise RuntimeError("The DivPrune curve requires an allocated H100 CUDA GPU")
+        raise RuntimeError("The token-retention curve requires an allocated H100 CUDA GPU")
 
     activate_live_log(output_dir / "run.log")
-    print(f"Starting DivPrune curve on {torch.cuda.get_device_name()}; "
-          f"ratios={args.ratios} seeds={args.seeds} test_all={args.test_all}", flush=True)
+    print(f"Starting {method} curve on {torch.cuda.get_device_name()}; "
+          f"ratios={args.ratios} mlp_seeds={args.seeds} random_seed={random_seed} "
+          f"test_all={args.test_all}", flush=True)
 
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
               "model_config_sha256": sha256(model_dir / "config.json"),
@@ -212,8 +237,11 @@ def main() -> int:
                                           "attention": "sdpa", "batch_size": 1,
                                           "flops_profile_target_clips_per_split": FLOP_PROFILE_TARGET},
               "ratios": args.ratios, "seeds": args.seeds, "chunk_size": args.chunk_size,
-              "method": "Qwen2.5 DivPrune on projected video tokens",
+              "method": ("Qwen2.5 DivPrune on projected video tokens" if method == "divprune"
+                         else "Qwen2.5 uniform random on projected video tokens"),
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
+    if method == "random":
+        config["random_seed"] = random_seed
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
     if config_path.is_file():
@@ -247,16 +275,20 @@ def main() -> int:
             for start in range(0, expected, args.chunk_size):
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
-                if complete_chunk(chunk, ids[start:end], model_dir, start, ratio, protocol, profile_stride):
+                if complete_chunk(chunk, ids[start:end], model_dir, start, ratio,
+                                  protocol, profile_stride, method, random_seed):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-                run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
+                command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
                      "--index-csv", str(index), "--output-pt", str(chunk),
                      "--model-dir", str(model_dir), "--start", str(start),
                      "--limit", str(end - start), "--retain-ratio", str(ratio),
                      "--profile-stride", str(profile_stride),
                      "--log-every", str(args.log_every),
-                     "--save-every", str(args.save_every)], env)
+                     "--save-every", str(args.save_every)]
+                if method == "random":
+                    command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
+                run(command, env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
                  "--pattern", f"{split}_*.pt"], env)
@@ -290,8 +322,8 @@ def main() -> int:
                          "--embeddings-pt", str(folder / "embeddings" / "mosei_test.pt"),
                          "--index", str(index_dir / "mosei_test_index.csv"),
                          "--output-dir", str(test_dir), "--device", "cuda"], env)
-    write_curve(output_dir, names, tuple(args.seeds))
-    print(f"DivPrune curve complete: {output_dir / 'validation_curve.csv'}", flush=True)
+    write_curve(output_dir, names, tuple(args.seeds), method, random_seed)
+    print(f"{method} curve complete: {output_dir / 'validation_curve.csv'}", flush=True)
     return 0
 
 

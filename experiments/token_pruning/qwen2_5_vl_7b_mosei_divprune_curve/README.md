@@ -75,8 +75,9 @@ predeclared conditions on held-out test with the same command plus `--test-all`.
 This reuses the train/validation artifacts, extracts test embeddings, and scores
 the saved MLP checkpoints. Report the entire test curve, seed spread, actual
 retention, and any failed samples. Do not pick a winning retention after seeing
-test scores. Random-token controls and extraction-seed variation are follow-up
-experiments, not evidence supplied by this run.
+test scores. The matched [random-token control](../qwen2_5_vl_7b_mosei_random_curve/README.md)
+runs as separate extraction seeds and is compared on validation before any
+test claims. Neither experiment has results yet.
 
 The earlier Kaggle Qwen2.5-VL-3B/MELD results motivated the 30% and 15% points.
 They are a different model, dataset, and label task, so they provide no MOSEI

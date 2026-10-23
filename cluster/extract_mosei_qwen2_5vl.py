@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
 from cluster.qwen_cost import profile_forward_flops  # noqa: E402
+from scripts.pruning.random_prune import sample_seed  # noqa: E402
 
 
 def log(message: str) -> None:
@@ -50,7 +51,10 @@ def main():
     parser.add_argument("--start", type=int, required=True)
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--retain-ratio", type=float, default=1.0,
-                        help="Fraction of projected video tokens retained by DivPrune; 1 is unpruned")
+                        help="Fraction of projected video tokens retained; 1 is unpruned")
+    parser.add_argument("--pruning", choices=("divprune", "random"), default="divprune")
+    parser.add_argument("--random-seed", type=int, default=42,
+                        help="Base seed for sample-ID-stable random token selection")
     parser.add_argument("--profile-stride", type=int, default=0,
                         help="Profile FLOPs for global index 0 and each stride thereafter; 0 disables profiling")
     parser.add_argument("--save-every", type=int, default=25)
@@ -62,6 +66,8 @@ def main():
         parser.error("--start must be nonnegative and --limit/--save-every/--log-every must be positive")
     if not 0 < args.retain_ratio <= 1:
         parser.error("--retain-ratio must be in (0, 1]")
+    if args.random_seed < 0:
+        parser.error("--random-seed must be nonnegative")
 
     with args.index_csv.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))[args.start:args.start + args.limit]
@@ -69,7 +75,9 @@ def main():
         raise ValueError(f"Expected {args.limit} index rows at offset {args.start}, found {len(rows)}")
 
     log(f"Starting extraction: index={args.index_csv} rows={args.start}:{args.start + args.limit} "
-        f"retention={args.retain_ratio:.0%} output={args.output_pt}")
+        f"retention={args.retain_ratio:.0%} pruning={args.pruning} "
+        f"random_seed={args.random_seed if args.pruning == 'random' else 'n/a'} "
+        f"output={args.output_pt}")
     import torch
     from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -78,8 +86,11 @@ def main():
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
               "limit": args.limit, "video_protocol": video_protocol,
               "pooling": "last_token", "layer": -1, "modality": "video_text",
-              "pruning": "divprune_projected_video_tokens" if args.retain_ratio < 1 else "none",
+              "pruning": (f"{args.pruning}_projected_video_tokens"
+                          if args.retain_ratio < 1 else "none"),
               "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
+    if args.pruning == "random":
+        config["random_seed"] = args.random_seed
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -125,6 +136,7 @@ def main():
         sample_id = row["sample_id"]
         if sample_id in done:
             continue
+        pruning_seed = sample_seed(args.random_seed, sample_id) if args.pruning == "random" else None
         try:
             sample_started = time.perf_counter()
             video_path = Path(row["video_path"])
@@ -160,7 +172,10 @@ def main():
             baseline_allocated = torch.cuda.memory_allocated(model.device)
             torch.cuda.reset_peak_memory_stats(model.device)
             forward_started = time.perf_counter()
-            with torch.inference_mode(), DivPruneHook(model, inputs["input_ids"], args.retain_ratio) as pruning:
+            with torch.inference_mode(), DivPruneHook(
+                model, inputs["input_ids"], args.retain_ratio,
+                method=args.pruning, random_seed=pruning_seed,
+            ) as pruning:
                 output = model.model(**inputs, use_cache=False, return_dict=True)
                 embedding = output.last_hidden_state[0, -1].float().cpu()
             torch.cuda.synchronize(model.device)
@@ -174,7 +189,10 @@ def main():
             if args.profile_stride and (args.start + offset) % args.profile_stride == 0:
                 log(f"Profiling theoretical forward FLOPs for {sample_id} "
                     f"(global row {args.start + offset})")
-                flops_profile = profile_forward_flops(model, inputs, inputs["input_ids"], args.retain_ratio)
+                flops_profile = profile_forward_flops(
+                    model, inputs, inputs["input_ids"], args.retain_ratio,
+                    method=args.pruning, random_seed=pruning_seed,
+                )
                 log(f"FLOP profile complete for {sample_id}")
             embeddings.append(embedding)
             ids.append(sample_id)
@@ -186,6 +204,7 @@ def main():
                              "full_sequence_tokens": pruning.full_sequence_tokens,
                              "retained_sequence_tokens": pruning.retained_sequence_tokens,
                              "actual_retain_ratio": pruning.retained_tokens / pruning.full_tokens,
+                             "random_prune_sample_seed": pruning_seed,
                              "preprocess_seconds": preprocess_ended - sample_started,
                              "forward_seconds": forward_ended - forward_started,
                              "end_to_end_seconds": forward_ended - sample_started,
