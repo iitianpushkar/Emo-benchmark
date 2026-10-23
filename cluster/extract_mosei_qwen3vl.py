@@ -7,9 +7,14 @@ import argparse
 import csv
 import json
 import os
+import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("FORCE_QWENVL_VIDEO_READER", "decord")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from cluster.qwen3_divprune import DivPruneHook  # noqa: E402
 
 
 def save(path, embeddings, ids, metadata, errors, config):
@@ -36,10 +41,14 @@ def main():
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--start", type=int, required=True)
     parser.add_argument("--limit", type=int, required=True)
+    parser.add_argument("--retain-ratio", type=float, default=1.0,
+                        help="Fraction of projected video tokens retained by DivPrune; 1 is unpruned")
     parser.add_argument("--save-every", type=int, default=25)
     args = parser.parse_args()
     if args.start < 0 or args.limit <= 0 or args.save_every <= 0:
         parser.error("--start must be nonnegative and --limit/--save-every must be positive")
+    if not 0 < args.retain_ratio <= 1:
+        parser.error("--retain-ratio must be in (0, 1]")
 
     with args.index_csv.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))[args.start:args.start + args.limit]
@@ -53,7 +62,9 @@ def main():
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
               "limit": args.limit, "video_protocol": video_protocol,
-              "pooling": "last_token", "layer": -1, "modality": "video_text"}
+              "pooling": "last_token", "layer": -1, "modality": "video_text",
+              "pruning": "divprune_projected_video_tokens" if args.retain_ratio < 1 else "none",
+              "retain_ratio": args.retain_ratio}
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -81,6 +92,7 @@ def main():
         if sample_id in done:
             continue
         try:
+            sample_started = time.perf_counter()
             video_path = Path(row["video_path"])
             if not video_path.is_file():
                 raise FileNotFoundError(video_path)
@@ -109,7 +121,7 @@ def main():
                 video_metadata=list(video_metadata), return_tensors="pt",
                 do_resize=False, **video_kwargs,
             ).to(model.device)
-            with torch.inference_mode():
+            with torch.inference_mode(), DivPruneHook(model, inputs["input_ids"], args.retain_ratio) as pruning:
                 output = model.model(**inputs, use_cache=False, return_dict=True)
                 embedding = output.last_hidden_state[0, -1].float().cpu()
             if embedding.shape != (4096,) or not torch.isfinite(embedding).all():
@@ -118,7 +130,11 @@ def main():
             ids.append(sample_id)
             metadata.append({"video_path": str(video_path), "utterance": row["utterance"],
                              "frame_count": frame_count,
-                             "frame_height": frame_height, "frame_width": frame_width})
+                             "frame_height": frame_height, "frame_width": frame_width,
+                             "full_visual_tokens": pruning.full_tokens,
+                             "retained_visual_tokens": pruning.retained_tokens,
+                             "actual_retain_ratio": pruning.retained_tokens / pruning.full_tokens,
+                             "sample_seconds": time.perf_counter() - sample_started})
             done.add(sample_id)
         except Exception as exc:
             errors.append({"sample_id": sample_id, "error": f"{type(exc).__name__}: {exc}"})

@@ -169,3 +169,22 @@ the test split. It saves artifacts under `../../results/qwen3_vl_8b_mosei/`.
 The launcher uses local model files and sets offline Hub mode for child
 processes. Re-running the same command resumes extraction chunks. See the
 [baseline protocol](../experiments/baselines/qwen3_vl_8b_mosei/README.md).
+
+## 4. DivPrune token-retention curve
+
+The [DivPrune protocol](../experiments/token_pruning/qwen3_vl_8b_mosei_divprune_curve/README.md)
+uses the same checkpoint, MOSEI splits, frame settings, and classifier family.
+It sweeps 100% through 5% of projected video tokens with three matched MLP
+seeds, recording actual token retention and extraction time. Validate inputs on
+the login node, then submit the GPU command inside an H100 allocation:
+
+```bash
+python cluster/run_mosei_divprune_curve.py --root ../.. --verify-only
+python cluster/run_mosei_divprune_curve.py --root ../..
+```
+
+After inspecting the full validation curve and fixing the selection rule, run
+`python cluster/run_mosei_divprune_curve.py --root ../.. --test-all` to score all
+predeclared ratios on test. The curve is computationally large: each ratio
+extracts train and validation clips separately, with test clips added by
+`--test-all`. It resumes verified chunks after an interrupted job.

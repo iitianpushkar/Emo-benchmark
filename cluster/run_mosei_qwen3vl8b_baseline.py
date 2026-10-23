@@ -177,7 +177,9 @@ def main() -> int:
                         and payload.get("config", {}).get("model_dir") == str(model_dir)
                         and payload.get("config", {}).get("start") == start
                         and payload.get("config", {}).get("limit") == end - start
-                        and payload.get("config", {}).get("video_protocol") == video_protocol):
+                        and payload.get("config", {}).get("video_protocol") == video_protocol
+                        and payload.get("config", {}).get("retain_ratio") == 1.0
+                        and payload.get("config", {}).get("pruning") == "none"):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
             run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen3vl.py"),
