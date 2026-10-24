@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
-from cluster.verify_qwen_environment import verify_qwen_environment  # noqa: E402
+from cluster.verify_qwen_environment import require_full_h100, verify_qwen_environment  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -149,13 +149,10 @@ def main() -> int:
     if transformers.__version__ != "4.57.1":
         raise RuntimeError("Install transformers==4.57.1 before running Qwen2.5 pruning/baseline")
 
-    if not torch.cuda.is_available() or not any(
-        "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
-    ):
-        raise RuntimeError("This full baseline requires an allocated H100 CUDA GPU")
+    gpu_name = require_full_h100(torch)
 
     activate_live_log(output_dir / "run.log")
-    print(f"Starting Qwen2.5-VL-7B MOSEI baseline on {torch.cuda.get_device_name()}", flush=True)
+    print(f"Starting Qwen2.5-VL-7B MOSEI baseline on {gpu_name}", flush=True)
 
     config = {
         "model_id": MODEL_ID,

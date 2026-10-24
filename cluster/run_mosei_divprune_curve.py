@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
-from cluster.verify_qwen_environment import verify_qwen_environment  # noqa: E402
+from cluster.verify_qwen_environment import require_full_h100, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
     verify_embeddings,
@@ -221,13 +221,10 @@ def main(method: str = "divprune") -> int:
     import transformers
     if transformers.__version__ != "4.57.1":
         raise RuntimeError("Install transformers==4.57.1 before running Qwen2.5 pruning/baseline")
-    if not torch.cuda.is_available() or not any(
-        "H100" in torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
-    ):
-        raise RuntimeError("The token-retention curve requires an allocated H100 CUDA GPU")
+    gpu_name = require_full_h100(torch)
 
     activate_live_log(output_dir / "run.log")
-    print(f"Starting {method} curve on {torch.cuda.get_device_name()}; "
+    print(f"Starting {method} curve on {gpu_name}; "
           f"ratios={args.ratios} mlp_seeds={args.seeds} random_seed={random_seed} "
           f"test_all={args.test_all}", flush=True)
 

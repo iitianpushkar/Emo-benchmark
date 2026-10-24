@@ -23,6 +23,21 @@ REQUIRED_PACKAGES = {
 }
 
 
+def require_full_h100(torch) -> str:
+    """Reject H100 MIG slices for the full 80 GB experiment protocol."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("This experiment requires an allocated full H100 GPU")
+    name = torch.cuda.get_device_name(0)
+    memory_gib = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    if "H100" not in name or memory_gib < 70:
+        raise RuntimeError(
+            f"This experiment requires a full H100 80 GB GPU; allocated device is "
+            f"{name} with {memory_gib:.1f} GiB. On Rorqual, request --gpus=h100:1 "
+            "instead of a 1g/2g/3g MIG slice."
+        )
+    return name
+
+
 def verify_qwen_environment(*, curve: bool = False) -> dict:
     """Report package versions and import compatibility on a login node."""
     try:

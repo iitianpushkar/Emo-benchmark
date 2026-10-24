@@ -139,6 +139,9 @@ This checks installed package versions, key imports, and whether PyTorch has
 CUDA support, then validates the local model and all MOSEI clip paths. It does
 not require a GPU on the login node. The compute-node run separately checks
 that an H100 is available.
+For the full baseline and token curves, request a full H100 80 GB device
+(`--gpus=h100:1` on Rorqual). A `2g.20gb` MIG allocation supplies 20 GB,
+and the launchers reject it before loading model weights.
 
 On Alliance clusters, install missing dependencies from the site wheelhouse
 inside the same activated virtual environment. In particular, use a
