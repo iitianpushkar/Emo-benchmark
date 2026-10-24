@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
-from cluster.verify_qwen_environment import require_full_h100, verify_qwen_environment  # noqa: E402
+from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
     verify_embeddings,
@@ -221,7 +221,7 @@ def main(method: str = "divprune") -> int:
     import transformers
     if transformers.__version__ != "4.57.1":
         raise RuntimeError("Install transformers==4.57.1 before running Qwen2.5 pruning/baseline")
-    gpu_name = require_full_h100(torch)
+    gpu_name = require_cuda_gpu(torch)
 
     activate_live_log(output_dir / "run.log")
     print(f"Starting {method} curve on {gpu_name}; "
