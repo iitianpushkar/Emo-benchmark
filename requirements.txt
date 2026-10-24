@@ -6,7 +6,7 @@ huggingface_hub
 accelerate
 qwen-vl-utils[decord]>=0.0.14
 decord
-opencv-python
+opencv-python  # On Alliance clusters, load the OpenCV module instead.
 pandas
 numpy
 mpmath

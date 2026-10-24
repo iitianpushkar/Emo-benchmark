@@ -145,6 +145,26 @@ inside the same activated virtual environment. In particular, use a
 `torchvision` wheel compatible with the installed Compute Canada PyTorch build;
 check the resolver's proposed changes before installing it.
 
+Alliance supplies OpenCV through a module rather than an `opencv-python` pip
+wheel. Do not install the generic `requirements.txt` as-is on Alliance; its
+`opencv-python` entry triggers the site's dummy wheel. Install other missing
+packages separately. Before activating the virtual environment, use
+`module spider opencv` to find an available version, then load it with the
+appropriate GCC module:
+
+```bash
+deactivate
+module load gcc
+module spider opencv
+module load opencv/<available-version>
+source /path/to/hf-env/bin/activate
+python -c 'import cv2; print(cv2.__version__, cv2.__file__)'
+```
+
+Load the same modules before activating the environment in every Slurm job.
+The verifier checks the actual `cv2` import and reports its version, so the
+absence of `opencv-python` pip metadata does not cause a false failure.
+
 Install the updated requirements in the cluster environment before the GPU
 job: Qwen2.5 video processing needs `qwen-vl-utils>=0.0.14`,
 `torch>=2.5.1` for FLOP counting, and `transformers==4.57.1`, the version used to define the pruning hook's

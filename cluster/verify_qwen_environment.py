@@ -15,7 +15,6 @@ REQUIRED_PACKAGES = {
     "huggingface_hub": "",
     "qwen-vl-utils": ">=0.0.14",
     "decord": "",
-    "opencv-python": "",
     "numpy": "",
     "mpmath": "",
     "scipy": "",
@@ -76,9 +75,16 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
             if attribute is not None:
                 getattr(module, attribute)
             import_status[label] = "ok"
-            print(f"  {label}: OK", flush=True)
+            if label == "OpenCV":
+                opencv_version = getattr(module, "__version__", "unknown")
+                packages["OpenCV (cv2)"] = opencv_version
+                print(f"  OpenCV: {opencv_version} (cv2 import OK)", flush=True)
+            else:
+                print(f"  {label}: OK", flush=True)
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
+            if label == "OpenCV" and isinstance(exc, ModuleNotFoundError):
+                message += "; on Alliance, load the OpenCV module before activating the virtual environment"
             import_status[label] = message
             errors.append(f"{label}: {message}")
             print(f"  {label}: FAIL ({message})", flush=True)
