@@ -132,8 +132,10 @@ def main() -> int:
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
     output_dir = (args.output_dir or root / "results" / "qwen2_5_vl_7b_mosei").expanduser().resolve()
+    print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
-    data = verify_mosei(mosei_root)
+    print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
+    data = verify_mosei(mosei_root, progress_every=500)
     mosei_root = Path(data["root"]).resolve()
     if args.verify_only:
         print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,

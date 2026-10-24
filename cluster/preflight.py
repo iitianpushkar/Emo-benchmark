@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
@@ -107,20 +108,27 @@ def verify_meld(base: Path) -> dict:
     return result
 
 
-def verify_mosei(base: Path) -> dict:
+def verify_mosei(base: Path, progress_every: int = 0) -> dict:
     root = dataset_root(base, "mosei")
     annotation = root / "csv" / "mosei_aligned.csv"
     if not annotation.is_file():
         raise ValueError(f"MOSEI aligned CSV missing under {root}")
     counts: Counter[str] = Counter()
     missing = []
+    started = time.monotonic()
     with annotation.open(newline="", encoding="utf-8-sig") as handle:
-        for row in csv.DictReader(handle):
+        for checked, row in enumerate(csv.DictReader(handle), start=1):
             counts[row["split"]] += 1
             clip = root / "Raw" / row["video_id"] / f"{row['clip_id']}.mp4"
             if not clip.is_file():
                 if len(missing) < 20:
                     missing.append(str(clip.relative_to(root)))
+            if progress_every and checked % progress_every == 0:
+                print(f"MOSEI verification: {checked}/{sum(MOSEI_COUNTS.values())} clip paths checked "
+                      f"({time.monotonic() - started:.1f}s elapsed)", flush=True)
+    if progress_every:
+        print(f"MOSEI verification: {sum(counts.values())} clip paths checked "
+              f"({time.monotonic() - started:.1f}s elapsed)", flush=True)
     if dict(counts) != MOSEI_COUNTS:
         raise ValueError(f"MOSEI split counts {dict(counts)} do not match {MOSEI_COUNTS}")
     if missing:

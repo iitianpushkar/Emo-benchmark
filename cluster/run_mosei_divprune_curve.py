@@ -203,8 +203,10 @@ def main(method: str = "divprune") -> int:
                           if method == "random" else "qwen2_5_vl_7b_mosei_uniform_curve"))
     output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
+    print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model_info = verify_model(model_dir, "qwen")
-    data_info = verify_mosei(mosei_root)
+    print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
+    data_info = verify_mosei(mosei_root, progress_every=500)
     mosei_root = Path(data_info["root"]).resolve()
     if args.verify_only:
         print(json.dumps({"model": model_info, "data": data_info, "protocol": protocol,
