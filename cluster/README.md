@@ -168,8 +168,9 @@ python -c 'import cv2; print(cv2.__version__, cv2.__file__)'
 Load the same modules before activating the environment in every Slurm job.
 Check that the printed Python path begins with the virtual environment path;
 the `(hf-env)` shell prompt alone does not guarantee that `python` resolves to
-the virtual environment. The verifier reports a mismatch when `VIRTUAL_ENV`
-and `sys.prefix` disagree.
+the virtual environment. The verifier requires a virtual-environment Python
+and checks that required package metadata and imports come from its prefix.
+OpenCV is the sole exception because Alliance provides `cv2` via a module.
 The verifier checks the actual `cv2` import and reports its version, so the
 absence of `opencv-python` pip metadata does not cause a false failure.
 

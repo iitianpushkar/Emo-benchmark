@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 REQUIRED_PACKAGES = {
+    "packaging": "",
     "torch": ">=2.5.1",
     "torchvision": "",
     "transformers": "==4.57.1",
@@ -41,8 +42,14 @@ def require_full_h100(torch) -> str:
 
 
 def verify_qwen_environment(*, curve: bool = False) -> dict:
-    """Report package versions and import compatibility on a login node."""
+    """Check dependencies installed inside the running virtual environment."""
     virtual_env = os.environ.get("VIRTUAL_ENV")
+    if sys.prefix == sys.base_prefix:
+        raise RuntimeError(
+            f"{sys.executable} is not running inside a Python virtual environment. "
+            "Activate the experiment environment after loading cluster modules, "
+            "or invoke its bin/python explicitly."
+        )
     if virtual_env and Path(sys.prefix).resolve() != Path(virtual_env).expanduser().resolve():
         raise RuntimeError(
             f"VIRTUAL_ENV={virtual_env}, but {sys.executable} is running with "
@@ -55,25 +62,35 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
     except ImportError as exc:
         raise RuntimeError("Install the Python requirements, including packaging, before verification") from exc
 
+    venv_root = Path(sys.prefix).resolve()
     packages = {}
+    package_locations = {}
     errors = []
     requirements = {**REQUIRED_PACKAGES, **({"matplotlib": ""} if curve else {})}
     print(f"Checking {len(requirements)} Qwen experiment packages in {sys.executable}", flush=True)
     for name, specifier in requirements.items():
         try:
-            version = importlib.metadata.version(name)
+            distribution = importlib.metadata.distribution(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None
             errors.append(f"{name}{specifier}: not installed")
             print(f"  {name}: MISSING", flush=True)
             continue
+        version = distribution.version
+        location = Path(distribution.locate_file("")).resolve()
         packages[name] = version
+        package_locations[name] = str(location)
         valid = not specifier or Version(version) in SpecifierSet(specifier)
-        print(f"  {name}: {version}{'' if valid else f' (requires {specifier})'}", flush=True)
+        inside_venv = location.is_relative_to(venv_root)
+        print(f"  {name}: {version}{'' if valid else f' (requires {specifier})'}"
+              f"{' (outside virtual environment)' if not inside_venv else ''}", flush=True)
         if not valid:
             errors.append(f"{name}: installed {version}, requires {specifier}")
+        if not inside_venv:
+            errors.append(f"{name}: installed at {location}, outside {venv_root}")
 
     imports = {
+        "packaging": ("packaging", None),
         "torch": ("torch", None),
         "torchvision": ("torchvision", None),
         "PyTorch FLOP counter": ("torch.utils.flop_counter", "FlopCounterMode"),
@@ -98,6 +115,10 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
             module = importlib.import_module(module_name)
             if attribute is not None:
                 getattr(module, attribute)
+            if label != "OpenCV":
+                module_file = getattr(module, "__file__", None)
+                if not module_file or not Path(module_file).resolve().is_relative_to(venv_root):
+                    raise RuntimeError(f"imported from {module_file}, outside {venv_root}")
             import_status[label] = "ok"
             if label == "OpenCV":
                 opencv_version = getattr(module, "__version__", "unknown")
@@ -124,4 +145,5 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
     print("Qwen environment verification passed; GPU availability is checked in the compute-node job", flush=True)
     return {"python": sys.version.split()[0], "executable": sys.executable,
             "prefix": sys.prefix, "virtual_env": virtual_env,
-            "packages": packages, "imports": import_status, "torch_cuda_build": cuda_build}
+            "packages": packages, "package_locations": package_locations,
+            "imports": import_status, "torch_cuda_build": cuda_build}
