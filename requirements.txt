@@ -1,5 +1,6 @@
 torch>=2.5.1
 transformers==4.57.1
+packaging
 huggingface_hub
 accelerate
 qwen-vl-utils[decord]>=0.0.14

@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
+from cluster.verify_qwen_environment import verify_qwen_environment  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -132,6 +133,7 @@ def main() -> int:
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
     output_dir = (args.output_dir or root / "results" / "qwen2_5_vl_7b_mosei").expanduser().resolve()
+    environment = verify_qwen_environment()
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
     print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
@@ -139,7 +141,7 @@ def main() -> int:
     mosei_root = Path(data["root"]).resolve()
     if args.verify_only:
         print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,
-                          "video_protocol": video_protocol}, indent=2))
+                          "video_protocol": video_protocol, "environment": environment}, indent=2))
         return 0
 
     import torch

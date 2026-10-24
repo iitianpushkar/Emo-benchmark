@@ -135,6 +135,11 @@ extractor records actual frame dimensions and counts in its metadata.
 python cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../.. --verify-only
 ```
 
+This checks installed package versions, key imports, and whether PyTorch has
+CUDA support, then validates the local model and all MOSEI clip paths. It does
+not require a GPU on the login node. The compute-node run separately checks
+that an H100 is available.
+
 Install the updated requirements in the cluster environment before the GPU
 job: Qwen2.5 video processing needs `qwen-vl-utils>=0.0.14`,
 `torch>=2.5.1` for FLOP counting, and `transformers==4.57.1`, the version used to define the pruning hook's

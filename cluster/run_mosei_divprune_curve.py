@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
+from cluster.verify_qwen_environment import verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
     verify_embeddings,
@@ -203,6 +204,7 @@ def main(method: str = "divprune") -> int:
                           if method == "random" else "qwen2_5_vl_7b_mosei_uniform_curve"))
     output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
+    environment = verify_qwen_environment(curve=True)
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model_info = verify_model(model_dir, "qwen")
     print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
@@ -211,7 +213,8 @@ def main(method: str = "divprune") -> int:
     if args.verify_only:
         print(json.dumps({"model": model_info, "data": data_info, "protocol": protocol,
                           "method": method, "random_seed": random_seed,
-                          "ratios": args.ratios, "seeds": args.seeds}, indent=2))
+                          "ratios": args.ratios, "seeds": args.seeds,
+                          "environment": environment}, indent=2))
         return 0
 
     import torch
