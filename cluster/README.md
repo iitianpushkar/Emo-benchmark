@@ -140,6 +140,11 @@ CUDA support, then validates the local model and all MOSEI clip paths. It does
 not require a GPU on the login node. The compute-node run separately checks
 that an H100 is available.
 
+On Alliance clusters, install missing dependencies from the site wheelhouse
+inside the same activated virtual environment. In particular, use a
+`torchvision` wheel compatible with the installed Compute Canada PyTorch build;
+check the resolver's proposed changes before installing it.
+
 Install the updated requirements in the cluster environment before the GPU
 job: Qwen2.5 video processing needs `qwen-vl-utils>=0.0.14`,
 `torch>=2.5.1` for FLOP counting, and `transformers==4.57.1`, the version used to define the pruning hook's

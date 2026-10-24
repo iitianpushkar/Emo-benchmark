@@ -9,6 +9,7 @@ import sys
 
 REQUIRED_PACKAGES = {
     "torch": ">=2.5.1",
+    "torchvision": "",
     "transformers": "==4.57.1",
     "accelerate": "",
     "huggingface_hub": "",
@@ -16,6 +17,8 @@ REQUIRED_PACKAGES = {
     "decord": "",
     "opencv-python": "",
     "numpy": "",
+    "mpmath": "",
+    "scipy": "",
     "scikit-learn": "",
     "Pillow": "",
 }
@@ -49,9 +52,12 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
 
     imports = {
         "torch": ("torch", None),
+        "torchvision": ("torchvision", None),
         "PyTorch FLOP counter": ("torch.utils.flop_counter", "FlopCounterMode"),
         "accelerate": ("accelerate", None),
         "NumPy": ("numpy", None),
+        "mpmath": ("mpmath", None),
+        "SciPy": ("scipy", None),
         "Pillow": ("PIL.Image", None),
         "Qwen2.5-VL model": ("transformers", "Qwen2_5_VLForConditionalGeneration"),
         "Qwen processor": ("transformers", "AutoProcessor"),

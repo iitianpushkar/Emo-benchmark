@@ -1,4 +1,5 @@
 torch>=2.5.1
+torchvision
 transformers==4.57.1
 packaging
 huggingface_hub
@@ -8,6 +9,8 @@ decord
 opencv-python
 pandas
 numpy
+mpmath
+scipy
 h5py
 scikit-learn
 tqdm
