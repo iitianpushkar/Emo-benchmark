@@ -161,10 +161,15 @@ module load gcc
 module spider opencv
 module load opencv/<available-version>
 source /path/to/hf-env/bin/activate
+python -c 'import sys; print(sys.executable, sys.prefix)'
 python -c 'import cv2; print(cv2.__version__, cv2.__file__)'
 ```
 
 Load the same modules before activating the environment in every Slurm job.
+Check that the printed Python path begins with the virtual environment path;
+the `(hf-env)` shell prompt alone does not guarantee that `python` resolves to
+the virtual environment. The verifier reports a mismatch when `VIRTUAL_ENV`
+and `sys.prefix` disagree.
 The verifier checks the actual `cv2` import and reports its version, so the
 absence of `opencv-python` pip metadata does not cause a false failure.
 

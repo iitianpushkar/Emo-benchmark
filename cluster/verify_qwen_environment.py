@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import os
 import sys
+from pathlib import Path
 
 
 REQUIRED_PACKAGES = {
@@ -40,6 +42,13 @@ def require_full_h100(torch) -> str:
 
 def verify_qwen_environment(*, curve: bool = False) -> dict:
     """Report package versions and import compatibility on a login node."""
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env and Path(sys.prefix).resolve() != Path(virtual_env).expanduser().resolve():
+        raise RuntimeError(
+            f"VIRTUAL_ENV={virtual_env}, but {sys.executable} is running with "
+            f"sys.prefix={sys.prefix}. Load cluster modules before activating the "
+            "virtual environment, then use its bin/python explicitly."
+        )
     try:
         from packaging.specifiers import SpecifierSet
         from packaging.version import Version
@@ -114,4 +123,5 @@ def verify_qwen_environment(*, curve: bool = False) -> dict:
         raise RuntimeError("Qwen environment verification failed:\n- " + "\n- ".join(errors))
     print("Qwen environment verification passed; GPU availability is checked in the compute-node job", flush=True)
     return {"python": sys.version.split()[0], "executable": sys.executable,
+            "prefix": sys.prefix, "virtual_env": virtual_env,
             "packages": packages, "imports": import_status, "torch_cuda_build": cuda_build}
