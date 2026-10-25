@@ -22,20 +22,24 @@ transfer node. The older `models/qwen` folder is reserved for 7B; this script
 checks the 3B model signature and does not download weights. Load the cluster
 OpenCV module before activating the experiment virtual environment. In that
 environment, install DeepFace and its RetinaFace detector dependencies, and
-stage the detector weights where the compute node can read them. Import checks
-alone do not prove that RetinaFace's weights are cached.
-The tracked baseline files are small enough to arrive with the code checkout;
-if they are stored elsewhere, pass `--baseline-dir /path/to/outputs`.
-One way to populate that cache on a login/transfer node with internet access is:
+stage the detector weights where the compute node can read them. On a networked
+login/transfer node, download the ONNX weight file:
 
 ```bash
-DEEPFACE_BACKEND_ENGINE=onnx ~/hf-env/bin/python -c \
-  'from deepface import DeepFace; DeepFace.build_model("retinaface", task="face_detector")'
+mkdir -p "$HOME/.deepface/weights"
+~/hf-env/bin/hf download serengil/deepface retinaface.onnx \
+  --local-dir "$HOME/.deepface/weights"
+ls -lh "$HOME/.deepface/weights/retinaface.onnx"
 ```
 
-Run this with the same `DEEPFACE_HOME` or home directory used by the compute
-job. The experiment loads RetinaFace before Qwen, so missing detector weights
-fail early.
+DeepFace looks in `$DEEPFACE_HOME/.deepface/weights/` when `DEEPFACE_HOME` is
+set, otherwise in `$HOME/.deepface/weights/`. If using a project directory,
+set `DEEPFACE_HOME` to the same absolute path while staging and in the Slurm
+job. The runner's `--verify-only` mode now checks for the weight file.
+The tracked baseline files are small enough to arrive with the code checkout;
+if they are stored elsewhere, pass `--baseline-dir /path/to/outputs`.
+The experiment loads RetinaFace before Qwen and needs no network access on the
+compute node once the weights are staged.
 
 From `codes/Emo-benchmark` on the login node:
 

@@ -131,6 +131,20 @@ def verify_face_dependencies() -> dict:
     return found
 
 
+def verify_retinaface_weights() -> Path:
+    """Require the ONNX detector weights before entering an offline GPU job."""
+    home = Path(os.environ.get("DEEPFACE_HOME", str(Path.home()))).expanduser()
+    weights = home / ".deepface" / "weights" / "retinaface.onnx"
+    if not weights.is_file() or weights.stat().st_size < 100_000_000:
+        raise FileNotFoundError(
+            f"RetinaFace ONNX weights missing or incomplete: {weights}. "
+            "Download serengil/deepface retinaface.onnx on a networked login/transfer "
+            "node into this directory, then run --verify-only again."
+        )
+    print(f"RetinaFace weights: {weights} ({weights.stat().st_size:,} bytes)", flush=True)
+    return weights
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -597,6 +611,7 @@ def main() -> int:
     print(f"Verifying environment: {sys.executable}", flush=True)
     environment = verify_qwen_environment()
     face_dependencies = verify_face_dependencies()
+    retinaface_weights = verify_retinaface_weights()
     print(f"Verifying MELD at {meld}", flush=True)
     meld_info = verify_meld(meld)
     meld = Path(meld_info["root"])
@@ -614,6 +629,7 @@ def main() -> int:
         raise ValueError(f"Saved full-video MLP has wrong Qwen3B input dimension: {checkpoint_path}")
     if args.verify_only:
         print(json.dumps({"environment": environment, "face_dependencies": face_dependencies,
+                          "retinaface_weights": str(retinaface_weights),
                           "meld": meld_info, "model": model_info,
                           "baseline_dir": str(baseline_dir),
                           "baseline_checkpoint_input_dim": baseline_checkpoint["input_dim"],
@@ -642,6 +658,7 @@ def main() -> int:
     DeepFace.build_model("retinaface", task="face_detector")
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
               "code_revision": code_revision(),
+              "retinaface_weights_sha256": digest(retinaface_weights),
               "model_config_sha256": digest(model_dir / "config.json"),
               "model_weight_bytes": {p.name: p.stat().st_size for p in sorted(model_dir.glob("*.safetensors"))},
               "baseline_checkpoint": str(checkpoint_path),
