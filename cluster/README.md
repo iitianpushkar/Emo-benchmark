@@ -46,7 +46,7 @@ From `codes/Emo-benchmark` on the login node:
 Then, inside a GPU allocation with the same modules and virtual environment:
 
 ```bash
-~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl3b_face_only.py --root ../..
+~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl3b_face_only.py --root ../.. --chunk-size 500
 ```
 
 For a short smoke test, use a **different output directory**:
@@ -56,8 +56,13 @@ For a short smoke test, use a **different output directory**:
   --limit-per-split 2 --output-dir ../../results/qwen3b_face_smoke
 ```
 
-The full run writes resumable per-clip `.pt` caches, face embeddings for each
-split, one dev-selected face MLP checkpoint, `matched_metrics.csv`,
+The full run processes 500 clips per chunk by default (`--chunk-size N` changes
+this). It saves each completed clip immediately under `cache/<split>/` and
+atomically writes completed chunks under `chunks/<split>/`. On restart it reuses
+complete chunks; if a job stopped within a chunk, it reuses that chunk's saved
+clips. Chunks with failures are retried on restart. Once each split finishes,
+the runner merges its chunks into `face_<split>.pt`. It then trains one
+dev-selected face MLP checkpoint and writes `matched_metrics.csv`,
 `matched_predictions.csv`, `paired_comparisons.csv`, `costs.csv`, and
 `cost_summary.json`, `coverage.json`, and `failures.csv` beneath
 `../../results/qwen2_5_vl_3b_meld_face_only`.
@@ -69,7 +74,7 @@ video input and retained count equals original because that baseline used no
 pruning. The historical baseline did not save per-clip token counts.
 Progress appears in the job's stdout and `run.log`; follow it from a login
 node with `tail -f ../../results/qwen2_5_vl_3b_meld_face_only/run.log`.
-Restart the same command after an interruption to reuse completed clip caches.
+Restart the same command with the same output directory after an interruption.
 Use `--skip-controls` only for an exploratory run and a separate output folder.
 By default, every 100th clip receives a sampled PyTorch registered-operator
 TFLOP estimate; change this with `--profile-every N` (or set 0 to disable it).

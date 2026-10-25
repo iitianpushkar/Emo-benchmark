@@ -53,6 +53,8 @@ def args_parser() -> argparse.ArgumentParser:
                         help="Smoke test: process at most N clips in each split")
     parser.add_argument("--skip-controls", action="store_true",
                         help="Skip the fixed-MLP dev ablation controls")
+    parser.add_argument("--chunk-size", type=int, default=500,
+                        help="Clips per resumable extraction chunk (default: 500)")
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--profile-every", type=int, default=100,
                         help="Optional counted-operator TFLOPs profile every Nth clip (0 disables)")
@@ -186,6 +188,34 @@ def atomic_torch(path: Path, value: object, torch) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
     torch.save(value, temp)
     temp.replace(path)
+
+
+def valid_chunk(payload, split: str, start: int, end: int, rows) -> bool:
+    """Check chunk identity and coverage before reusing or merging it."""
+    if not isinstance(payload, dict):
+        return False
+    expected = [row["sample_id"] for row in rows[start:end]]
+    if (payload.get("split") != split or payload.get("start") != start
+            or payload.get("end") != end or payload.get("expected_sample_ids") != expected):
+        return False
+    items = payload.get("items")
+    failures = payload.get("failures")
+    if not isinstance(items, list) or not isinstance(failures, list):
+        return False
+    try:
+        done = [item["sample_id"] for item in items]
+        failed = [item["sample_id"] for item in failures]
+    except (KeyError, TypeError):
+        return False
+    if len(done) + len(failed) != len(expected) or set(done + failed) != set(expected):
+        return False
+    expected_labels = {row["sample_id"]: row["emotion"] for row in rows[start:end]}
+    try:
+        return all(item["label"] == expected_labels[item["sample_id"]]
+                   and "face" in item["embeddings"] and "face" in item["costs"]
+                   for item in items)
+    except (KeyError, TypeError):
+        return False
 
 
 def face_ordinals(frames, grid, vision, deepface, cv2, np, overlap):
@@ -554,8 +584,9 @@ def evaluate(output, payloads, baseline_checkpoint, face_checkpoint,
 def main() -> int:
     parser = args_parser()
     args = parser.parse_args()
-    if args.log_every <= 0 or args.profile_every < 0 or (args.epochs is not None and args.epochs <= 0):
-        parser.error("Invalid log, profile, or epoch interval")
+    if (args.log_every <= 0 or args.chunk_size <= 0 or args.profile_every < 0
+            or (args.epochs is not None and args.epochs <= 0)):
+        parser.error("Invalid chunk, log, profile, or epoch interval")
     if args.limit_per_split is not None and args.limit_per_split <= 0:
         parser.error("--limit-per-split must be positive")
     root = args.root.expanduser().resolve()
@@ -653,51 +684,92 @@ def main() -> int:
         rows_by_split[split] = rows[:args.limit_per_split] if args.limit_per_split else rows
         print(f"{split}: {len(rows_by_split[split])} selected clips", flush=True)
 
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        str(model_dir), torch_dtype=dtype, device_map="auto", local_files_only=True,
-        attn_implementation="sdpa",
-    ).eval()
-    model.requires_grad_(False)
-    processor = AutoProcessor.from_pretrained(str(model_dir), local_files_only=True,
-                                              min_pixels=128 * 28 * 28,
-                                              max_pixels=args.frame_size**2)
-    payloads, items_by_split, failures = {}, {}, []
+    model = processor = None
+    payloads, sample_ids_by_split, usable_by_split, failures, cost_rows = {}, {}, {}, [], []
     for split in SPLITS:
         rows = rows_by_split[split]
         folder = output / "cache" / split
         folder.mkdir(parents=True, exist_ok=True)
+        chunks_dir = output / "chunks" / split
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+        chunk_paths = []
+        for start in range(0, len(rows), args.chunk_size):
+            end = min(start + args.chunk_size, len(rows))
+            chunk_path = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
+            chunk_paths.append((start, end, chunk_path))
+            chunk = None
+            if chunk_path.is_file():
+                try:
+                    chunk = torch.load(chunk_path, map_location="cpu", weights_only=False)
+                except Exception as exc:
+                    print(f"Could not load {chunk_path}: {exc!r}; rebuilding", flush=True)
+            if valid_chunk(chunk, split, start, end, rows) and not chunk["failures"]:
+                print(f"Reusing complete chunk {chunk_path} ({end - start} clips)", flush=True)
+                continue
+            if model is None:
+                dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                print("Loading Qwen for extraction", flush=True)
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    str(model_dir), torch_dtype=dtype, device_map="auto", local_files_only=True,
+                    attn_implementation="sdpa",
+                ).eval()
+                model.requires_grad_(False)
+                processor = AutoProcessor.from_pretrained(str(model_dir), local_files_only=True,
+                                                          min_pixels=128 * 28 * 28,
+                                                          max_pixels=args.frame_size**2)
+            print(f"Processing {split} chunk {start}:{end} ({end - start} clips)", flush=True)
+            chunk_items, chunk_failures = [], []
+            for i in range(start, end):
+                row = rows[i]
+                cache = folder / f"{row['sample_id']}.pt"
+                try:
+                    if cache.is_file():
+                        item = torch.load(cache, map_location="cpu", weights_only=False)
+                        required = {"face"}
+                        if split == "dev" and not args.skip_controls and item["face_ordinals"]:
+                            required.add("divprune_matched")
+                        if item["sample_id"] != row["sample_id"] or item["label"] != row["emotion"]:
+                            raise ValueError(f"Cached sample identity mismatch: {cache}")
+                        if not required.issubset(item["embeddings"]):
+                            raise ValueError(f"Cached conditions missing: {cache}")
+                    else:
+                        args.current_sample = i + 1
+                        print(f"Extracting {split}/{row['sample_id']} ({i + 1}/{len(rows)})", flush=True)
+                        item = extract_one(row, split, model, processor, args, torch, np, cv2,
+                                           DeepFace, process_vision_info)
+                        atomic_torch(cache, item, torch)
+                    chunk_items.append(item)
+                except Exception as exc:
+                    chunk_failures.append({"split": split, "sample_id": row["sample_id"], "error": repr(exc)})
+                    print(f"{split}/{row['sample_id']} FAILED: {exc!r}", flush=True)
+                if (i + 1) % args.log_every == 0 or i + 1 == len(rows):
+                    print(f"{split}: {i + 1}/{len(rows)} visited, "
+                          f"{len(chunk_items)} usable in current chunk, "
+                          f"{len(chunk_failures)} failures in current chunk", flush=True)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            chunk = {"split": split, "start": start, "end": end,
+                     "expected_sample_ids": [row["sample_id"] for row in rows[start:end]],
+                     "items": chunk_items, "failures": chunk_failures}
+            if not valid_chunk(chunk, split, start, end, rows):
+                raise RuntimeError(f"Chunk coverage mismatch: {chunk_path}")
+            atomic_torch(chunk_path, chunk, torch)
+            print(f"Saved {chunk_path}: {len(chunk_items)} usable, "
+                  f"{len(chunk_failures)} failures", flush=True)
+            del chunk_items, chunk
         items = []
-        for i, row in enumerate(rows, start=1):
-            cache = folder / f"{row['sample_id']}.pt"
-            try:
-                if cache.is_file():
-                    item = torch.load(cache, map_location="cpu", weights_only=False)
-                    required = {"face"}
-                    if split == "dev" and not args.skip_controls and item["face_ordinals"]:
-                        required.add("divprune_matched")
-                    if item["sample_id"] != row["sample_id"] or item["label"] != row["emotion"]:
-                        raise ValueError(f"Cached sample identity mismatch: {cache}")
-                    if not required.issubset(item["embeddings"]):
-                        raise ValueError(f"Cached conditions missing: {cache}")
-                else:
-                    args.current_sample = i
-                    print(f"Extracting {split}/{row['sample_id']} ({i}/{len(rows)})", flush=True)
-                    item = extract_one(row, split, model, processor, args, torch, np, cv2,
-                                       DeepFace, process_vision_info)
-                    atomic_torch(cache, item, torch)
-                items.append(item)
-            except Exception as exc:
-                failures.append({"split": split, "sample_id": row["sample_id"], "error": repr(exc)})
-                print(f"{split}/{row['sample_id']} FAILED: {exc!r}", flush=True)
-            if i % args.log_every == 0 or i == len(rows):
-                print(f"{split}: {i}/{len(rows)} visited, {len(items)} cached/usable, "
-                      f"{sum(x['split'] == split for x in failures)} failures", flush=True)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        for start, end, chunk_path in chunk_paths:
+            chunk = torch.load(chunk_path, map_location="cpu", weights_only=False)
+            if not valid_chunk(chunk, split, start, end, rows):
+                raise RuntimeError(f"Invalid extraction chunk: {chunk_path}")
+            items.extend(chunk["items"])
+            failures.extend(chunk["failures"])
+            del chunk
+        print(f"Merged {len(chunk_paths)} {split} chunks; {len(items)} usable clips", flush=True)
         if not items:
             raise RuntimeError(f"No usable {split} samples; inspect {output / 'run.log'}")
-        items_by_split[split] = items
+        sample_ids_by_split[split] = [item["sample_id"] for item in items]
+        usable_by_split[split] = len(items)
         payload = make_payload(items, "face", torch)
         payloads[(split, "face")] = payload
         atomic_torch(output / f"face_{split}.pt", payload, torch)
@@ -706,23 +778,6 @@ def main() -> int:
                                                     for seed in CONTROL_SEEDS]:
                 if any(name in item["embeddings"] for item in items):
                     payloads[(split, name)] = make_payload(items, name, torch)
-        with (output / "failures.csv").open("w", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=["split", "sample_id", "error"])
-            writer.writeheader(); writer.writerows(failures)
-
-    del model
-    torch.cuda.empty_cache()
-    face_checkpoint = train_face_mlp(output, args, baseline_checkpoint, torch)
-    if list(face_checkpoint["label_names"]) != LABELS:
-        raise ValueError("Face checkpoint label order differs from MELD")
-    for split in SPLITS:
-        ids = [x["sample_id"] for x in items_by_split[split]]
-        if payloads[(split, "face")]["sample_ids"] != ids:
-            raise ValueError(f"{split} face payload is not aligned to extracted clips")
-    evaluate(output, payloads, baseline_checkpoint, face_checkpoint,
-             baseline_predictions, args, torch, np)
-    cost_rows = []
-    for split, items in items_by_split.items():
         for item in items:
             for condition, cost in item["costs"].items():
                 cost_rows.append({"split": split, "sample_id": item["sample_id"],
@@ -733,6 +788,23 @@ def main() -> int:
                                   "face_detection_seconds": item["face_detection_seconds"],
                                   "clip_all_conditions_seconds": item["clip_all_conditions_seconds"],
                                   **cost})
+        del items
+        with (output / "failures.csv").open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=["split", "sample_id", "error"])
+            writer.writeheader(); writer.writerows(failures)
+
+    if model is not None:
+        del model
+    torch.cuda.empty_cache()
+    face_checkpoint = train_face_mlp(output, args, baseline_checkpoint, torch)
+    if list(face_checkpoint["label_names"]) != LABELS:
+        raise ValueError("Face checkpoint label order differs from MELD")
+    for split in SPLITS:
+        ids = sample_ids_by_split[split]
+        if payloads[(split, "face")]["sample_ids"] != ids:
+            raise ValueError(f"{split} face payload is not aligned to extracted clips")
+    evaluate(output, payloads, baseline_checkpoint, face_checkpoint,
+             baseline_predictions, args, torch, np)
     with (output / "costs.csv").open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(cost_rows[0]))
         writer.writeheader(); writer.writerows(cost_rows)
@@ -762,7 +834,7 @@ def main() -> int:
             }
     atomic_json(output / "cost_summary.json", summary)
     atomic_json(output / "coverage.json", {
-        split: {"selected": len(rows_by_split[split]), "usable": len(items_by_split[split]),
+        split: {"selected": len(rows_by_split[split]), "usable": usable_by_split[split],
                 "failures": sum(row["split"] == split for row in failures)}
         for split in SPLITS
     })
