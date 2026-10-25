@@ -1,5 +1,86 @@
 # Cluster staging and preflight
 
+## MELD face-only Qwen2.5-VL-3B experiment
+
+The cluster version of the two Kaggle face-token notebooks is
+[`run_meld_qwen2_5vl3b_face_only.py`](run_meld_qwen2_5vl3b_face_only.py).
+It uses the same 6 FPS, 4–64 frames, 224 frame-size request, emotion-task
+prompt, last-token pooling, RetinaFace detector and 10% patch-overlap rule.
+Visual tokens are physically removed at the language-model entry after the
+vision encoder. Only the face-only MLP is trained. The runner reuses the tracked
+full-video MLP checkpoint and its saved dev/test predictions from
+`experiments/baselines/qwen2_5_vl_3b_shared/outputs`. It extracts only the
+baseline-covered dev/test clips and reports both methods on the same usable
+sample IDs. The saved baseline covers 1,102 dev and 2,599 test clips before
+any new face-extraction failures. The dev ablation also applies the saved full-video MLP to
+face-only, no-video, time/count-matched random and nonface tokens, and
+count-matched DivPrune. No utterance-only MLP is trained.
+
+Put the complete MELD copy at `../../datasets/meld` and download
+`Qwen/Qwen2.5-VL-3B-Instruct` into `../../models/qwen2_5_vl_3b` on a login or
+transfer node. The older `models/qwen` folder is reserved for 7B; this script
+checks the 3B model signature and does not download weights. Load the cluster
+OpenCV module before activating the experiment virtual environment. In that
+environment, install DeepFace and its RetinaFace detector dependencies, and
+stage the detector weights where the compute node can read them. Import checks
+alone do not prove that RetinaFace's weights are cached.
+The tracked baseline files are small enough to arrive with the code checkout;
+if they are stored elsewhere, pass `--baseline-dir /path/to/outputs`.
+One way to populate that cache on a login/transfer node with internet access is:
+
+```bash
+DEEPFACE_BACKEND_ENGINE=onnx ~/hf-env/bin/python -c \
+  'from deepface import DeepFace; DeepFace.build_model("retinaface", task="face_detector")'
+```
+
+Run this with the same `DEEPFACE_HOME` or home directory used by the compute
+job. The experiment loads RetinaFace before Qwen, so missing detector weights
+fail early.
+
+From `codes/Emo-benchmark` on the login node:
+
+```bash
+~/hf-env/bin/python cluster/run_meld_qwen2_5vl3b_face_only.py --root ../.. --verify-only
+```
+
+Then, inside a GPU allocation with the same modules and virtual environment:
+
+```bash
+~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl3b_face_only.py --root ../..
+```
+
+For a short smoke test, use a **different output directory**:
+
+```bash
+~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl3b_face_only.py --root ../.. \
+  --limit-per-split 2 --output-dir ../../results/qwen3b_face_smoke
+```
+
+The full run writes resumable per-clip `.pt` caches, face embeddings for each
+split, one dev-selected face MLP checkpoint, `matched_metrics.csv`,
+`matched_predictions.csv`, `paired_comparisons.csv`, `costs.csv`, and
+`cost_summary.json`, `coverage.json`, and `failures.csv` beneath
+`../../results/qwen2_5_vl_3b_meld_face_only`.
+`matched_predictions.csv`, `matched_metrics.csv`, and `costs.csv` put
+`original_visual_tokens` beside `retained_visual_tokens`; the metrics and cost
+summaries also report both totals and weighted retention. For saved baseline
+prediction rows, the original count is reconstructed from this run's matching
+video input and retained count equals original because that baseline used no
+pruning. The historical baseline did not save per-clip token counts.
+Progress appears in the job's stdout and `run.log`; follow it from a login
+node with `tail -f ../../results/qwen2_5_vl_3b_meld_face_only/run.log`.
+Restart the same command after an interruption to reuse completed clip caches.
+Use `--skip-controls` only for an exploratory run and a separate output folder.
+By default, every 100th clip receives a sampled PyTorch registered-operator
+TFLOP estimate; change this with `--profile-every N` (or set 0 to disable it).
+The cost table flags those profiled forwards because profiler overhead affects
+their latency. CUDA peak allocation and exact retained-token counts are also
+recorded per clip and condition. The estimator is partial and should be
+described as counted-operator FLOPs in a paper. Cost measurements in this run
+cover the new face and dev-control forwards; the saved baseline predictions
+do not contain comparable new compute-node timing or memory measurements.
+
+
 This is the first handoff step for the H100 cluster. It does not run an
 experiment. It checks access, downloads complete dataset and model snapshots,
 then verifies them from a compute node.
