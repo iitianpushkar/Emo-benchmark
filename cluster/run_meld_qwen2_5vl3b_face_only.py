@@ -211,6 +211,9 @@ def code_revision() -> str | None:
 
 def validate_resume_config(previous: dict, current: dict, output: Path) -> None:
     """Permit known operational updates without mixing incompatible embeddings."""
+    # run_config.json turns tuples (such as CONTROL_SEEDS) into lists. Compare
+    # the serialized form so a resume does not mistake that for a setting change.
+    current = json.loads(json.dumps(current))
     operational = {"code_revision", "retinaface_runtime"}
     previous_revision = str(previous.get("code_revision") or "")
     missing_weight_hash = "retinaface_weights_sha256" not in previous
@@ -771,7 +774,7 @@ def main() -> int:
     config_path = output / "run_config.json"
     if config_path.is_file():
         previous = json.loads(config_path.read_text())
-        if previous != config:
+        if previous != json.loads(json.dumps(config)):
             validate_resume_config(previous, config, output)
     atomic_json(config_path, config)
 
