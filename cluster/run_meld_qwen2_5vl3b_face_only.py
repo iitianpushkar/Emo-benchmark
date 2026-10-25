@@ -112,7 +112,15 @@ def verify_face_dependencies() -> dict:
             if not module_path.is_relative_to(prefix):
                 raise RuntimeError(f"{module} is outside virtual environment: {module_path}")
             if package == "deepface":
-                getattr(imported, "DeepFace")
+                # DeepFace is a submodule; importing the package alone does not
+                # necessarily expose it as an attribute until it is imported.
+                api = importlib.import_module("deepface.DeepFace")
+                api_path = Path(api.__file__).resolve()
+                if not api_path.is_relative_to(prefix):
+                    raise RuntimeError(f"deepface.DeepFace is outside virtual environment: {api_path}")
+                for name in ("build_model", "extract_faces"):
+                    if not callable(getattr(api, name, None)):
+                        raise RuntimeError(f"deepface.DeepFace.{name} is unavailable")
             found[package] = dist.version
             print(f"  {package}: {dist.version} ({module_path})", flush=True)
         except Exception as exc:
