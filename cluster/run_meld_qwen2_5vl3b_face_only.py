@@ -145,6 +145,38 @@ def verify_retinaface_weights() -> Path:
     return weights
 
 
+def build_retinaface_for_allocation(deepface) -> dict:
+    """Build DeepFace's ONNX detector using the CPUs assigned by Slurm."""
+    import onnxruntime as ort
+
+    available = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    requested = int(os.environ.get("SLURM_CPUS_PER_TASK", available))
+    threads = max(1, min(available, requested))
+    original_options = ort.SessionOptions
+
+    def limited_options(*args, **kwargs):
+        options = original_options(*args, **kwargs)
+        options.intra_op_num_threads = threads
+        options.inter_op_num_threads = 1
+        return options
+
+    # retinaface's ONNX loader constructs SessionOptions internally. Replace
+    # that factory only while DeepFace builds its singleton detector, then
+    # restore it so other ONNX users keep their own configuration.
+    ort.SessionOptions = limited_options
+    try:
+        detector = deepface.build_model("retinaface", task="face_detector")
+    finally:
+        ort.SessionOptions = original_options
+    session = getattr(getattr(detector, "model", None), "session", None)
+    if session is None:
+        raise RuntimeError("RetinaFace did not expose its ONNX session; thread limit is unverified")
+    runtime = {"onnxruntime": ort.__version__, "intra_op_threads": threads,
+               "inter_op_threads": 1, "providers": session.get_providers()}
+    print(f"RetinaFace runtime: {runtime}", flush=True)
+    return runtime
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -232,7 +264,7 @@ def valid_chunk(payload, split: str, start: int, end: int, rows) -> bool:
         return False
 
 
-def face_ordinals(frames, grid, vision, deepface, cv2, np, overlap):
+def face_ordinals(frames, grid, vision, deepface, cv2, np, overlap, progress_label=None):
     """Union faces from both frames of each temporal Qwen tubelet."""
     t, h, w = grid
     merge = int(vision.spatial_merge_size)
@@ -243,6 +275,7 @@ def face_ordinals(frames, grid, vision, deepface, cv2, np, overlap):
     cell = int(vision.patch_size) * merge
     width, height = w * int(vision.patch_size), h * int(vision.patch_size)
     selected, boxes = set(), defaultdict(list)
+    detection_started = last_progress = time.perf_counter()
     for fi, frame in enumerate(frames):
         image = frame.detach().cpu().numpy() if hasattr(frame, "detach") else np.asarray(frame)
         if image.ndim != 3:
@@ -258,6 +291,11 @@ def face_ordinals(frames, grid, vision, deepface, cv2, np, overlap):
             img_path=cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
             detector_backend="retinaface", enforce_detection=False, align=False,
         )
+        now = time.perf_counter()
+        if progress_label and now - last_progress >= 30:
+            print(f"{progress_label}: RetinaFace {fi + 1}/{len(frames)} frames "
+                  f"in {now - detection_started:.1f}s", flush=True)
+            last_progress = now
         for face in detected:
             if float(face.get("confidence", 0)) <= 0:
                 continue
@@ -378,22 +416,35 @@ def forward(model, batch, mask, selected, torch, divprune=False, profile=False):
 def extract_one(row, split, model, processor, args, torch, np, cv2, deepface, process_vision_info):
     from scripts.extraction.extract_qwen_shared_embeddings import fix_video_kwargs, make_message
     started = time.perf_counter()
+    trace = args.current_sample == 1 or args.current_sample % 100 == 0
+    progress_label = f"{split}/{row['sample_id']}"
     messages = make_message(row["video_path"], row["utterance"], args.fps,
                             args.min_frames, args.max_frames, args.frame_size,
                             "emotion_task", "video_text")
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    if trace:
+        print(f"{progress_label}: decoding video", flush=True)
     images, videos, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+    if trace:
+        print(f"{progress_label}: decoded {len(videos[0]) if videos else 0} frames "
+              f"in {time.perf_counter() - started:.1f}s; processing Qwen input", flush=True)
     batch = processor(text=[text], images=images, videos=videos, padding=True,
                       return_tensors="pt", **fix_video_kwargs(video_kwargs))
     if len(videos) != 1 or batch["video_grid_thw"].shape[0] != 1:
         raise ValueError("Expected one video and one Qwen video grid")
     processed = time.perf_counter()
     grid = tuple(int(x) for x in batch["video_grid_thw"][0].tolist())
+    if trace:
+        print(f"{progress_label}: Qwen input ready in {processed - started:.1f}s; "
+              f"detecting faces on {len(videos[0])} frames", flush=True)
     face, boxes, per_pair = face_ordinals(
         videos[0], grid, model.config.vision_config, deepface, cv2, np,
-        args.overlap_fraction,
+        args.overlap_fraction, progress_label,
     )
     detected = time.perf_counter()
+    if trace:
+        print(f"{progress_label}: face detection finished in {detected - processed:.1f}s; "
+              f"retained {len(face)} visual tokens", flush=True)
     mask = batch["input_ids"].eq(model.config.video_token_id)
     total = grid[0] * per_pair
     if int(mask.sum()) != total:
@@ -410,12 +461,16 @@ def extract_one(row, split, model, processor, args, torch, np, cv2, deepface, pr
                 conditions[f"nonface_{seed}"] = nonface_keep
     embeddings, costs = {}, {}
     for name, selected in conditions.items():
+        if trace:
+            print(f"{progress_label}: Qwen forward for {name}", flush=True)
         embeddings[name], costs[name] = forward(
             model, batch, mask, selected, torch,
             divprune=name == "divprune_matched",
             profile=args.profile_every > 0 and args.current_sample % args.profile_every == 0,
         )
     finished = time.perf_counter()
+    if trace:
+        print(f"{progress_label}: extraction finished in {finished - started:.1f}s", flush=True)
     return {"sample_id": row["sample_id"], "label": row["emotion"],
             "dialogue_id": row["dialogue_id"], "video_path": row["video_path"],
             "grid": grid, "face_ordinals": face, "boxes": boxes,
@@ -655,10 +710,11 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     print("Loading RetinaFace detector; its weights must already be available to this node", flush=True)
-    DeepFace.build_model("retinaface", task="face_detector")
+    retinaface_runtime = build_retinaface_for_allocation(DeepFace)
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
               "code_revision": code_revision(),
               "retinaface_weights_sha256": digest(retinaface_weights),
+              "retinaface_runtime": retinaface_runtime,
               "model_config_sha256": digest(model_dir / "config.json"),
               "model_weight_bytes": {p.name: p.stat().st_size for p in sorted(model_dir.glob("*.safetensors"))},
               "baseline_checkpoint": str(checkpoint_path),
@@ -678,8 +734,19 @@ def main() -> int:
                            **face_dependencies}}
     output.mkdir(parents=True, exist_ok=True)
     config_path = output / "run_config.json"
-    if config_path.is_file() and json.loads(config_path.read_text()) != config:
-        raise ValueError(f"Output directory has different run settings: {config_path}")
+    if config_path.is_file():
+        previous = json.loads(config_path.read_text())
+        if previous != config:
+            # aefe030 used the same extraction and classifier protocol but
+            # did not bound RetinaFace's ONNX thread pool or log its provider.
+            operational = {"code_revision", "retinaface_runtime"}
+            compatible = (str(previous.get("code_revision", "")).startswith("aefe030")
+                          and "retinaface_runtime" not in previous
+                          and {k: v for k, v in previous.items() if k not in operational}
+                          == {k: v for k, v in config.items() if k not in operational})
+            if not compatible:
+                raise ValueError(f"Output directory has different run settings: {config_path}")
+            print(f"Resuming {output} with bounded RetinaFace threads", flush=True)
     atomic_json(config_path, config)
 
     index_dir = output / "indexes"

@@ -79,6 +79,13 @@ pruning. The historical baseline did not save per-clip token counts.
 Progress appears in the job's stdout and `run.log`; follow it from a login
 node with `tail -f ../../results/qwen2_5_vl_3b_meld_face_only/run.log`.
 Restart the same command with the same output directory after an interruption.
+The runner limits RetinaFace's ONNX thread pool to the CPUs assigned to the
+Slurm task and prints its active execution provider. It also prints video
+decode, face detection, and Qwen-forward phases for the first clip and every
+100th clip, plus progress during face detection whenever a clip takes over
+30 seconds. With a CPU-only ONNX provider, increasing `--cpus-per-task` can
+improve detector throughput; allocate those CPUs in the Slurm job rather than
+letting ONNX create threads across the whole node.
 Use `--skip-controls` only for an exploratory run and a separate output folder.
 By default, every 100th clip receives a sampled PyTorch registered-operator
 TFLOP estimate; change this with `--profile-every N` (or set 0 to disable it).
