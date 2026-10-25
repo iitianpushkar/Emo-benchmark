@@ -8,6 +8,7 @@ qwen-vl-utils[decord]>=0.0.14
 decord
 opencv-python  # On Alliance clusters, load the OpenCV module instead.
 deepface  # RetinaFace detector for MELD face-token pruning.
+Werkzeug  # Required by DeepFace image utilities.
 pandas
 numpy
 mpmath

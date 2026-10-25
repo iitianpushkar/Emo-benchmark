@@ -101,7 +101,8 @@ def verify_face_dependencies() -> dict:
     prefix = Path(sys.prefix).resolve()
     found = {}
     print("Checking face-detector imports in the active virtual environment", flush=True)
-    for package, module in (("deepface", "deepface"), ("pandas", "pandas")):
+    for package, module in (("Werkzeug", "werkzeug"), ("deepface", "deepface"),
+                            ("pandas", "pandas")):
         try:
             dist = importlib.metadata.distribution(package)
             location = Path(dist.locate_file("")).resolve()
