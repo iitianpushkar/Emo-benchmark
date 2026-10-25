@@ -209,6 +209,41 @@ def code_revision() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def validate_resume_config(previous: dict, current: dict, output: Path) -> None:
+    """Permit known operational updates without mixing incompatible embeddings."""
+    operational = {"code_revision", "retinaface_runtime"}
+    previous_revision = str(previous.get("code_revision") or "")
+    missing_weight_hash = "retinaface_weights_sha256" not in previous
+    if missing_weight_hash and previous_revision.startswith("6b076c1"):
+        # The first resumable version did not record the detector weight hash.
+        # Its outputs cannot be tied to the staged weights, so reuse is safe
+        # only if no embedding or classifier artifact has been written yet.
+        artifacts = (list((output / "cache").rglob("*.pt"))
+                     + list((output / "chunks").rglob("*.pt"))
+                     + list(output.glob("face_*.pt")))
+        if not artifacts:
+            operational.add("retinaface_weights_sha256")
+    old_science = {key: value for key, value in previous.items() if key not in operational}
+    new_science = {key: value for key, value in current.items() if key not in operational}
+    differences = {key: {"previous": old_science.get(key, "<missing>"),
+                         "current": new_science.get(key, "<missing>")}
+                   for key in sorted(old_science.keys() | new_science.keys())
+                   if old_science.get(key, "<missing>") != new_science.get(key, "<missing>")}
+    compatible_revision = (previous_revision.startswith("aefe030")
+                           or previous_revision.startswith("6b076c1")
+                           or previous_revision == str(current.get("code_revision")))
+    if differences or not compatible_revision:
+        if not compatible_revision:
+            differences["code_revision"] = {"previous": previous.get("code_revision"),
+                                            "current": current.get("code_revision")}
+        raise ValueError(
+            f"Output directory has different run settings: {output / 'run_config.json'}\n"
+            f"Differences: {json.dumps(differences, indent=2, default=str)}\n"
+            "Use a new --output-dir for a different experiment; do not delete cached embeddings."
+        )
+    print(f"Resuming {output} with compatible run settings", flush=True)
+
+
 def run_live(command: list[str]) -> None:
     """Mirror child output through the Python tee as well as job stdout."""
     print("Running:", " ".join(command), flush=True)
@@ -737,16 +772,7 @@ def main() -> int:
     if config_path.is_file():
         previous = json.loads(config_path.read_text())
         if previous != config:
-            # aefe030 used the same extraction and classifier protocol but
-            # did not bound RetinaFace's ONNX thread pool or log its provider.
-            operational = {"code_revision", "retinaface_runtime"}
-            compatible = (str(previous.get("code_revision", "")).startswith("aefe030")
-                          and "retinaface_runtime" not in previous
-                          and {k: v for k, v in previous.items() if k not in operational}
-                          == {k: v for k, v in config.items() if k not in operational})
-            if not compatible:
-                raise ValueError(f"Output directory has different run settings: {config_path}")
-            print(f"Resuming {output} with bounded RetinaFace threads", flush=True)
+            validate_resume_config(previous, config, output)
     atomic_json(config_path, config)
 
     index_dir = output / "indexes"
