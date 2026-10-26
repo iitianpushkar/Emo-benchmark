@@ -177,6 +177,23 @@ def build_retinaface_for_allocation(deepface) -> dict:
     return runtime
 
 
+def verify_qwen_cuda_placement(model) -> None:
+    """Report Accelerate's placement and reject CPU/disk model offload."""
+    device_map = {name: str(device) for name, device in
+                  getattr(model, "hf_device_map", {}).items()}
+    parameter_bytes = defaultdict(int)
+    for parameter in model.parameters():
+        parameter_bytes[str(parameter.device)] += parameter.numel() * parameter.element_size()
+    gib_by_device = {device: round(size / 2**30, 3)
+                     for device, size in sorted(parameter_bytes.items())}
+    print(f"Qwen device map: {device_map}", flush=True)
+    print(f"Qwen parameter GiB by device: {gib_by_device}", flush=True)
+    if not parameter_bytes or any(not device.startswith("cuda:") for device in parameter_bytes):
+        raise RuntimeError("Qwen parameters are not entirely on CUDA; CPU/disk offload would distort latency")
+    if any(device in ("cpu", "disk") for device in device_map.values()):
+        raise RuntimeError("Qwen device_map includes CPU/disk offload")
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -232,8 +249,8 @@ def validate_resume_config(previous: dict, current: dict, output: Path) -> None:
                          "current": new_science.get(key, "<missing>")}
                    for key in sorted(old_science.keys() | new_science.keys())
                    if old_science.get(key, "<missing>") != new_science.get(key, "<missing>")}
-    compatible_revision = (previous_revision.startswith("aefe030")
-                           or previous_revision.startswith("6b076c1")
+    compatible_revision = (any(previous_revision.startswith(revision) for revision in
+                               ("6b076c1", "aefe030", "c3ea2c3", "e730ac3", "7a1bc6b"))
                            or previous_revision == str(current.get("code_revision")))
     if differences or not compatible_revision:
         if not compatible_revision:
@@ -375,6 +392,8 @@ def matched_controls(face: list[int], t: int, per_pair: int, seed: int):
 
 def forward(model, batch, mask, selected, torch, divprune=False, profile=False):
     """Run one frozen forward and prune projected tokens before the LM."""
+    if batch["input_ids"].device.type != "cuda":
+        raise RuntimeError("Qwen forward input is not on CUDA")
     visual = mask[0].nonzero().flatten()
     n = int(visual.numel())
     if selected is not None and any(i < 0 or i >= n for i in selected):
@@ -427,6 +446,8 @@ def forward(model, batch, mask, selected, torch, divprune=False, profile=False):
             else:
                 output = model.model(**batch, use_cache=False, return_dict=True)
                 flops = None
+        if output.last_hidden_state.device.type != "cuda":
+            raise RuntimeError("Qwen forward output is not on CUDA")
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - started
@@ -827,6 +848,7 @@ def main() -> int:
                     attn_implementation="sdpa",
                 ).eval()
                 model.requires_grad_(False)
+                verify_qwen_cuda_placement(model)
                 processor = AutoProcessor.from_pretrained(str(model_dir), local_files_only=True,
                                                           min_pixels=128 * 28 * 28,
                                                           max_pixels=args.frame_size**2)
