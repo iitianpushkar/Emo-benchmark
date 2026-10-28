@@ -9,6 +9,11 @@ import json
 import os
 from pathlib import Path
 
+# Support direct execution from a read-only Kaggle benchmark-code dataset.
+import sys as _sys
+if __package__ in (None, ""):
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 os.environ.setdefault("FORCE_QWENVL_VIDEO_READER", "decord")
 
 import numpy as np

@@ -6,9 +6,10 @@ Run the three split notebooks as independent Kaggle jobs:
 - [Dev extraction](notebooks/detectorv2_speaker_prompt_meld_dev.ipynb) → `meld_dev.pt`
 - [Test extraction](notebooks/detectorv2_speaker_prompt_meld_test.ipynb) → `meld_test.pt`
 
-Attach the `pushkarsingh2005/meld-dataset` input and enable Internet and GPU
-for each job. Each notebook includes the extractor source, so it can clone the
-public repository and write the new extractor even before this change is pushed.
+Attach the current `pushkarsingh2005/benchmark-code` and
+`pushkarsingh2005/meld-dataset` Kaggle inputs and enable Internet and GPU for
+each job. Refresh `benchmark-code` from this repository first: the notebooks
+run its `scripts/extraction/extract_meld_detectorv2_prompt.py` directly.
 Each job extracts only its assigned split and saves its own `.pt` artifact under
 `/kaggle/working/detectorv2_prompt/`. Training and classification can be done
 later, after all three artifacts are available together.
