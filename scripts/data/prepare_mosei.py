@@ -17,9 +17,27 @@ FIELDS = (
     "utterance", "emotion", "emotion_id", "start_seconds", "end_seconds", "sentiment", *EMOTIONS,
     *(f"{name}_label" for name in EMOTIONS),
 )
+SINGLE_FIELDS = (*FIELDS, "label_status", "max_emotion_score", "tied_emotions")
+SINGLE_LABELS = (*EMOTIONS, "neutral")
 
 
-def prepare_rows(aligned_csv: Path, raw_dir: Path, include_missing: bool = False) -> tuple[dict[str, list[dict[str, str]]], Counter]:
+def single_label(scores: dict[str, float], tie_policy: str = "first", zero_policy: str = "neutral") -> tuple[str | None, str, float, str]:
+    """Select one class by maximum score, recording ambiguous selections."""
+    if any(value < 0 for value in scores.values()):
+        raise ValueError("Single-label MOSEI emotion scores must be nonnegative")
+    maximum = max(scores.values())
+    if maximum == 0:
+        return ("neutral" if zero_policy == "neutral" else None), "all_zero", maximum, ""
+    winners = [name for name in EMOTIONS if scores[name] == maximum]
+    if len(winners) > 1:
+        return (winners[0] if tie_policy == "first" else None), "tied_max", maximum, "|".join(winners)
+    return winners[0], "unique_max", maximum, winners[0]
+
+
+def prepare_rows(
+    aligned_csv: Path, raw_dir: Path, include_missing: bool = False,
+    target_mode: str = "multilabel", tie_policy: str = "first", zero_policy: str = "neutral",
+) -> tuple[dict[str, list[dict[str, str]]], Counter]:
     rows = {split: [] for split in SPLITS}
     missing = Counter()
     seen_samples: set[str] = set()
@@ -71,12 +89,23 @@ def prepare_rows(aligned_csv: Path, raw_dir: Path, include_missing: bool = False
                 "end_seconds": source["end_seconds"],
                 "sentiment": source.get("sentiment", ""),
             }
+            scores = {}
             for emotion in EMOTIONS:
                 score = float(source[emotion])
                 if not math.isfinite(score):
                     raise ValueError(f"Line {line}: invalid {emotion} score")
+                scores[emotion] = score
                 row[emotion] = source[emotion]
                 row[f"{emotion}_label"] = str(int(score > 0))
+            if target_mode == "single_max":
+                label, status, maximum, tied = single_label(scores, tie_policy, zero_policy)
+                if label is None:
+                    continue
+                row["emotion"] = label
+                row["emotion_id"] = str(SINGLE_LABELS.index(label))
+                row["label_status"] = status
+                row["max_emotion_score"] = str(maximum)
+                row["tied_emotions"] = tied
             rows[split].append(row)
     return rows, missing
 
@@ -84,20 +113,38 @@ def prepare_rows(aligned_csv: Path, raw_dir: Path, include_missing: bool = False
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mosei-root", type=Path, default=Path("dataset/CMU-MOSEI"))
+    parser.add_argument("--aligned-csv", type=Path,
+                        help="Aligned CSV when it is separate from the video root (for example on Kaggle).")
+    parser.add_argument("--raw-dir", type=Path,
+                        help="Directory containing <video_id>/<clip_id>.mp4 (overrides ROOT/Raw).")
     parser.add_argument("--output-dir", type=Path, default=Path("data/indexes"))
     parser.add_argument("--include-missing", action="store_true")
+    parser.add_argument("--target-mode", choices=("multilabel", "single_max"), default="multilabel")
+    parser.add_argument("--tie-policy", choices=("first", "exclude"), default="first",
+                        help="For a tied positive maximum, choose the first emotion in the documented order or exclude the clip.")
+    parser.add_argument("--zero-policy", choices=("neutral", "exclude"), default="neutral",
+                        help="For clips with no positive emotion score, assign neutral or exclude the clip.")
     args = parser.parse_args()
     root = args.mosei_root.expanduser().resolve()
-    rows, missing = prepare_rows(root / "csv" / "mosei_aligned.csv", root / "Raw", args.include_missing)
+    aligned_csv = (args.aligned_csv or root / "csv" / "mosei_aligned.csv").expanduser().resolve()
+    raw_dir = (args.raw_dir or root / "Raw").expanduser().resolve()
+    if not aligned_csv.is_file():
+        parser.error(f"Aligned CSV not found: {aligned_csv}")
+    if not raw_dir.is_dir():
+        parser.error(f"Video directory not found: {raw_dir}")
+    rows, missing = prepare_rows(aligned_csv, raw_dir, args.include_missing,
+                                 args.target_mode, args.tie_policy, args.zero_policy)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for split in SPLITS:
         path = args.output_dir / f"mosei_{split}_index.csv"
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=FIELDS)
+            writer = csv.DictWriter(handle, fieldnames=SINGLE_FIELDS if args.target_mode == "single_max" else FIELDS)
             writer.writeheader()
             writer.writerows(rows[split])
         counts = {name: sum(int(row[f"{name}_label"]) for row in rows[split]) for name in EMOTIONS}
-        print(f"{split}: {len(rows[split])} rows, {missing[split]} missing clips, positives={counts} -> {path}")
+        classes = Counter(row["emotion"] for row in rows[split]) if args.target_mode == "single_max" else None
+        print(f"{split}: {len(rows[split])} rows, {missing[split]} missing clips, "
+              f"{'classes=' + str(dict(classes)) if classes is not None else 'positives=' + str(counts)} -> {path}")
 
 
 if __name__ == "__main__":
