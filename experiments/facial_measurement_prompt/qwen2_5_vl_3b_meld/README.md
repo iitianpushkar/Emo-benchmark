@@ -13,6 +13,11 @@ Each job extracts only its assigned split and saves its own `.pt` artifact under
 `/kaggle/working/detectorv2_prompt/`. Training and classification can be done
 later, after all three artifacts are available together.
 
+The install cell removes Kaggle's unused Gradio and Diffusers preinstalls,
+which require `huggingface-hub` 1.x. The experiment pins Transformers 4.57.1,
+which requires `huggingface-hub` below 1. The next cell checks that Detectorv2,
+Qwen, and the video utility import successfully before extraction begins.
+
 The experiment retains the existing Qwen2.5-VL-3B-Instruct protocol: 6 fps,
 4–64 frames at 224 pixels, full video plus utterance plus seven-class emotion
 task, frozen final shared hidden state, last-token pooling, and a newly trained
