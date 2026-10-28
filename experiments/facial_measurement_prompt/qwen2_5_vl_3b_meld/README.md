@@ -18,6 +18,11 @@ The install cell removes Kaggle's unused Gradio and Diffusers preinstalls,
 which require `huggingface-hub` 1.x. The experiment pins Transformers 4.57.1,
 which requires `huggingface-hub` below 1. The next cell checks that Detectorv2,
 Qwen, and the video utility import successfully before extraction begins.
+Detectorv2 runs with cuDNN disabled only for its inference call to work around
+the GPU convolution-engine error seen in some environments; Qwen retains its
+normal backend. A run using the earlier detector setting is preserved as
+`*.pre_cudnn_fix.pt` before starting fresh. Future interrupted runs retry
+recorded errors and stop promptly on a repeated engine failure with a traceback.
 
 The experiment retains the existing Qwen2.5-VL-3B-Instruct protocol: 6 fps,
 4–64 frames at 224 pixels, full video plus utterance plus seven-class emotion

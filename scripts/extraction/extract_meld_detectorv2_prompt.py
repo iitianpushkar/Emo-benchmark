@@ -7,6 +7,7 @@ import argparse
 import gc
 import json
 import os
+import traceback
 from pathlib import Path
 
 # Support direct execution from a read-only Kaggle benchmark-code dataset.
@@ -47,6 +48,8 @@ def parse_args():
     p.add_argument("--limit", type=int)
     p.add_argument("--save-every", type=int, default=25)
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--retry-errors", action="store_true",
+                   help="When resuming, retry previously failed clips.")
     return p.parse_args()
 
 
@@ -164,21 +167,25 @@ def main():
     if not required.issubset(df.columns):
         raise ValueError(f"Missing index fields: {required - set(df.columns)}")
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
-              if k not in {"resume", "save_every"}}
+              if k not in {"resume", "retry_errors", "save_every"}}
     config["detector_package"] = "py-feat 2.1.5"
+    config["detector_cudnn_enabled"] = False
     payload = {"embeddings": torch.empty((0, 0), dtype=torch.float16),
                "labels": torch.empty((0,), dtype=torch.long), "sample_ids": [],
                "metadata": [], "errors": [], "label_names": LABELS, "config": config}
     if args.resume and args.output_pt.exists():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
         if payload.get("config") != config:
-            raise ValueError("Resume configuration differs from saved output")
+            raise ValueError("Resume configuration differs from saved output. Save the old .pt file "
+                             "elsewhere and start a fresh extraction for this detector setting.")
+        if args.retry_errors:
+            payload["errors"] = []
     elif args.output_pt.exists():
         raise FileExistsError("Output exists; use --resume or choose another path")
     done = set(payload["sample_ids"]) | {e["sample_id"] for e in payload["errors"]}
-    processor = AutoProcessor.from_pretrained(args.model_id)
+    processor = AutoProcessor.from_pretrained(args.model_id, use_fast=False)
     qwen = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.model_id, torch_dtype=torch.float16, device_map="auto").eval()
+        args.model_id, dtype=torch.float16, device_map="auto").eval()
     detector = Detectorv2(device="cuda" if torch.cuda.is_available() else "cpu",
                           identity_model=None)
     embeddings = [x for x in payload["embeddings"]]
@@ -187,12 +194,15 @@ def main():
         payload["embeddings"] = torch.stack(embeddings) if embeddings else torch.empty((0, 0), dtype=torch.float16)
         payload["labels"] = torch.tensor(labels, dtype=torch.long)
         save(args.output_pt, payload)
+    consecutive_errors = 0
     for count, row in enumerate(df.itertuples(index=False), 1):
         if row.sample_id in done:
             continue
+        stage = "index_validation"
         try:
             if row.emotion not in LABELS or LABELS[int(row.emotion_id)] != row.emotion:
                 raise ValueError("Index emotion and emotion_id disagree")
+            stage = "video_decode"
             messages = make_message(str(row.video_path), str(row.utterance), args.fps,
                                     args.min_frames, args.max_frames, args.frame_size,
                                     "emotion_task", "video_text")
@@ -205,10 +215,17 @@ def main():
             detector_frames = frames
             if frames.is_floating_point() and float(frames.max()) <= 1.0:
                 detector_frames = (frames * 255).clamp(0, 255)
-            # Both models see exactly the same sampled Qwen frames.
-            fex = detector.detect(detector_frames, data_type="tensor", batch_size=8,
-                                  face_detection_threshold=args.face_threshold,
-                                  progress_bar=False)
+            # Py-Feat's ConvNeXt depthwise convolution can fail to find a cuDNN
+            # engine on some Kaggle GPU stacks. Keep cuDNN available to Qwen.
+            stage = "detectorv2"
+            previous_cudnn = torch.backends.cudnn.enabled
+            try:
+                torch.backends.cudnn.enabled = False
+                fex = detector.detect(detector_frames, data_type="tensor", batch_size=8,
+                                      face_detection_threshold=args.face_threshold,
+                                      progress_bar=False)
+            finally:
+                torch.backends.cudnn.enabled = previous_cudnn
             summary = speaker_summary(fex, len(frames))
             prompt = make_prompt(str(row.utterance), "emotion_task", "video_text") + "\n" + face_prompt(summary)
             messages[0]["content"][-1]["text"] = prompt
@@ -217,7 +234,9 @@ def main():
             if images:
                 kwargs["images"] = images
             kwargs.update(fix_video_kwargs(video_kwargs))
+            stage = "qwen_processor"
             inputs = processor(**kwargs).to(qwen.device)
+            stage = "qwen_forward"
             with torch.inference_mode():
                 output = qwen.model(**inputs, use_cache=False, return_dict=True)
             embedding = pool_hidden_states(output.last_hidden_state.detach().float().cpu(),
@@ -226,12 +245,23 @@ def main():
             labels.append(int(row.emotion_id))
             payload["sample_ids"].append(row.sample_id)
             payload["metadata"].append({"sample_id": row.sample_id, "speaker_face": summary,
-                                        "prompt": prompt, "sampled_frames": len(frames)})
+                                        "prompt": prompt, "sampled_frames": len(frames),
+                                        "detector_cudnn_enabled": False})
+            consecutive_errors = 0
             print(f"{count}: {row.sample_id} {summary['status']} ({len(frames)} frames)", flush=True)
         except Exception as exc:
-            payload["errors"].append({"sample_id": row.sample_id,
-                                      "error": f"{type(exc).__name__}: {exc}"})
-            print(f"{count}: {row.sample_id} ERROR {exc}", flush=True)
+            consecutive_errors += 1
+            detail = traceback.format_exc()
+            payload["errors"].append({"sample_id": row.sample_id, "stage": stage,
+                                      "error": f"{type(exc).__name__}: {exc}",
+                                      "traceback": detail})
+            print(f"{count}: {row.sample_id} ERROR at {stage}: {exc}", flush=True)
+            if consecutive_errors == 1:
+                print(detail, flush=True)
+            if "unable to find an engine" in str(exc).lower() or consecutive_errors >= 10:
+                checkpoint()
+                raise RuntimeError(f"Stopped after a systematic failure at {stage}; "
+                                   f"inspect {args.output_pt} errors and traceback") from exc
         if count % args.save_every == 0:
             checkpoint()
         gc.collect()
