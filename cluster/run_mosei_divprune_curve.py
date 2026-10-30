@@ -36,7 +36,8 @@ def ratio_name(ratio: float) -> str:
 
 def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
                    ratio: float, protocol: dict, profile_stride: int,
-                   method: str = "divprune", random_seed: int | None = None) -> bool:
+                   method: str = "divprune", random_seed: int | None = None,
+                   important_ratio: float = 0.5) -> bool:
     if not path.is_file():
         return False
     import torch
@@ -57,6 +58,7 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and config.get("retain_ratio") == ratio
         and config.get("pruning") == expected_pruning
         and config.get("random_seed") == random_seed
+        and (method != "vispruner" or config.get("important_ratio") == important_ratio)
         and config.get("profile_stride") == profile_stride
         and config.get("video_protocol") == protocol
         and len(payload.get("metadata", [])) == len(ids)
@@ -70,6 +72,8 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
 def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
                 method: str = "divprune", random_seed: int | None = None) -> None:
     rows = []
+    important_ratio = (json.loads((root / "run_config.json").read_text())["important_ratio"]
+                       if method == "vispruner" else None)
     for name in names:
         folder = root / name
         split_summaries = json.loads((folder / "cost_summary.json").read_text())
@@ -82,6 +86,7 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
         row = {
             "method": method,
             "extraction_seed": random_seed,
+            "important_ratio": important_ratio,
             "condition": name,
             "requested_retention": int(name[1:]) / 100,
             "actual_retention_train": split_summaries["train"]["weighted_retention"],
@@ -162,7 +167,7 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
 
 
 def main(method: str = "divprune") -> int:
-    if method not in ("divprune", "random", "uniform"):
+    if method not in ("divprune", "random", "uniform", "vispruner"):
         raise ValueError(f"Unknown token pruning method: {method}")
     parser = argparse.ArgumentParser(description=f"Run a Qwen2.5-VL-7B {method} token-retention curve on MOSEI")
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
@@ -174,6 +179,9 @@ def main(method: str = "divprune") -> int:
     if method == "random":
         parser.add_argument("--random-seed", type=int, default=42,
                             help="Base seed for deterministic per-sample token selection")
+    if method == "vispruner":
+        parser.add_argument("--important-ratio", type=float, default=0.5,
+                            help="Fraction of retained tokens chosen by vision attention")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=1,
                         help="Print extraction progress every N new clips")
@@ -184,11 +192,14 @@ def main(method: str = "divprune") -> int:
                         help="After the validation curve is fixed, evaluate every ratio on test")
     args = parser.parse_args()
     random_seed = args.random_seed if method == "random" else None
+    important_ratio = args.important_ratio if method == "vispruner" else 0.5
     if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0 or not args.seeds
             or len(set(args.seeds)) != len(args.seeds)):
         parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
     if random_seed is not None and random_seed < 0:
         parser.error("--random-seed must be nonnegative")
+    if not 0 <= important_ratio <= 1:
+        parser.error("--important-ratio must be in [0, 1]")
     try:
         names = [ratio_name(ratio) for ratio in args.ratios]
     except ValueError as exc:
@@ -199,9 +210,8 @@ def main(method: str = "divprune") -> int:
     stage_root = args.root.expanduser().resolve()
     model_dir = (args.model_dir or stage_root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or stage_root / "datasets" / "mosei").expanduser().resolve()
-    default_name = ("qwen2_5_vl_7b_mosei_divprune_curve" if method == "divprune"
-                    else (f"qwen2_5_vl_7b_mosei_random_curve_seed{random_seed}"
-                          if method == "random" else "qwen2_5_vl_7b_mosei_uniform_curve"))
+    default_name = (f"qwen2_5_vl_7b_mosei_{method}_curve"
+                    + (f"_seed{random_seed}" if method == "random" else ""))
     output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     environment = verify_qwen_environment(curve=True)
@@ -213,6 +223,7 @@ def main(method: str = "divprune") -> int:
     if args.verify_only:
         print(json.dumps({"model": model_info, "data": data_info, "protocol": protocol,
                           "method": method, "random_seed": random_seed,
+                          "important_ratio": important_ratio if method == "vispruner" else None,
                           "ratios": args.ratios, "seeds": args.seeds,
                           "environment": environment}, indent=2))
         return 0
@@ -226,6 +237,7 @@ def main(method: str = "divprune") -> int:
     activate_live_log(output_dir / "run.log")
     print(f"Starting {method} curve on {gpu_name}; "
           f"ratios={args.ratios} mlp_seeds={args.seeds} random_seed={random_seed} "
+          f"important_ratio={important_ratio if method == 'vispruner' else None} "
           f"test_all={args.test_all}", flush=True)
 
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
@@ -240,12 +252,16 @@ def main(method: str = "divprune") -> int:
                                           "attention": "sdpa", "batch_size": 1,
                                           "flops_profile_target_clips_per_split": FLOP_PROFILE_TARGET},
               "ratios": args.ratios, "seeds": args.seeds, "chunk_size": args.chunk_size,
-              "method": ("Qwen2.5 DivPrune on projected video tokens" if method == "divprune"
-                         else ("Qwen2.5 uniform random on projected video tokens"
-                               if method == "random" else "Qwen2.5 temporal-stratified uniform projected video tokens")),
+              "method": {"divprune": "Qwen2.5 DivPrune on projected video tokens",
+                         "random": "Qwen2.5 uniform random on projected video tokens",
+                         "uniform": "Qwen2.5 temporal-stratified uniform projected video tokens",
+                         "vispruner": "Qwen2.5 VisPruner adapted vision-attention and diversity pruning"}[method],
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
     if method == "random":
         config["random_seed"] = random_seed
+    if method == "vispruner":
+        config["important_ratio"] = important_ratio
+        config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
     if config_path.is_file():
@@ -280,7 +296,7 @@ def main(method: str = "divprune") -> int:
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
                 if complete_chunk(chunk, ids[start:end], model_dir, start, ratio,
-                                  protocol, profile_stride, method, random_seed):
+                                  protocol, profile_stride, method, random_seed, important_ratio):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
                 command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
@@ -294,6 +310,8 @@ def main(method: str = "divprune") -> int:
                     command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
                 elif method == "uniform":
                     command.extend(["--pruning", "uniform"])
+                elif method == "vispruner":
+                    command.extend(["--pruning", "vispruner", "--important-ratio", str(important_ratio)])
                 run(command, env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),

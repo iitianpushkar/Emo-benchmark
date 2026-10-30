@@ -11,7 +11,7 @@ anger, surprise, disgust, fear. A score greater than zero is positive. The
 released train/valid/test assignment is retained, with 16,326/1,871/4,659
 clips respectively. The extractor uses frozen Qwen weights, video plus the
 segment transcript, an `utterance_only` prompt, 6 FPS, 4–64 frames resized
-to 448 × 448, and last-layer/last-token embeddings. These shared video settings
+to 224 × 224, and last-layer/last-token embeddings. These shared video settings
 are defined in [`cluster/mosei_video_protocol.json`](../../../cluster/mosei_video_protocol.json)
 for all roughly 8B VLM comparisons. The saved metadata records each clip's
 actual frame count, resized dimensions, token counts, synchronized latency,
@@ -21,7 +21,7 @@ does not enter the latency measurement. Chunk files and final
 embeddings use separate paths for each split. Extraction must cover every
 indexed sample with no recorded errors before classification starts.
 
-Changing the frame size changes the run configuration; any earlier 224 × 224
+Changing the frame size changes the run configuration; any earlier 448 × 448
 artifacts must use a separate output directory. Verify GPU memory on an H100
 before submitting the full dataset job, especially for clips near 64 frames.
 

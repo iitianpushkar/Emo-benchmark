@@ -3,7 +3,7 @@
 This is a **planned, unrun** deterministic coverage control for the
 [DivPrune](../qwen2_5_vl_7b_mosei_divprune_curve/README.md) and
 [uniform-random](../qwen2_5_vl_7b_mosei_random_curve/README.md) token curves.
-It uses the same model, MOSEI splits, transcript, 448 × 448 video frames at
+It uses the same model, MOSEI splits, transcript, 224 × 224 video frames at
 6 FPS, 4–64 frames per clip, 13 retention ratios from 100% to 5%, and three
 matched MLP seeds. The six-label validation macro F1 at a fixed threshold
 of 0.5 is the main comparison metric.

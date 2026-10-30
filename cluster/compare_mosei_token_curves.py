@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare matched MOSEI DivPrune, random, and uniform-token curves."""
+"""Compare matched MOSEI DivPrune, random, uniform, and VisPruner curves."""
 
 from __future__ import annotations
 
@@ -48,14 +48,17 @@ def main() -> int:
                         help="One independent random extraction seed per directory")
     parser.add_argument("--uniform-dir", type=Path,
                         help="Deterministic temporal-stratified uniform curve")
+    parser.add_argument("--vispruner-dir", type=Path,
+                        help="Qwen-adapted VisPruner attention/diversity curve")
     parser.add_argument("--output-csv", type=Path, required=True)
     args = parser.parse_args()
-    if not args.random_dirs and not args.uniform_dir:
-        parser.error("Supply --random-dirs and/or --uniform-dir")
+    if not args.random_dirs and not args.uniform_dir and not args.vispruner_dir:
+        parser.error("Supply at least one comparison curve")
 
     div_config, div_rows, div_costs = read_run(args.divprune_dir)
     random_runs = [read_run(folder) for folder in (args.random_dirs or [])]
     uniform_run = read_run(args.uniform_dir) if args.uniform_dir else None
+    vispruner_run = read_run(args.vispruner_dir) if args.vispruner_dir else None
     random_seeds = [config.get("random_seed") for config, _, _ in random_runs]
     if None in random_seeds or len(set(random_seeds)) != len(random_seeds):
         raise ValueError("Random run directories must have distinct extraction seeds")
@@ -70,6 +73,10 @@ def main() -> int:
         if "temporal-stratified uniform" not in uniform_run[0]["method"]:
             raise ValueError("--uniform-dir does not contain a uniform-token curve")
         verify_match(args.uniform_dir, uniform_run, div_config, div_rows, div_costs)
+    if vispruner_run:
+        if "VisPruner" not in vispruner_run[0]["method"]:
+            raise ValueError(f"{args.vispruner_dir} does not contain a VisPruner curve")
+        verify_match(args.vispruner_dir, vispruner_run, div_config, div_rows, div_costs)
 
     output_rows = []
     for ratio in sorted(div_rows):
@@ -130,6 +137,21 @@ def main() -> int:
                 result["uniform_minus_random_macro_f1"] = (
                     float(uniform["valid_macro_f1_at_0.5_mean"]) - statistics.mean(random_f1)
                 )
+        if vispruner_run:
+            vispruner = vispruner_run[1][ratio]
+            result.update({
+                "vispruner_code_revision": vispruner_run[0].get("code_revision"),
+                "vispruner_important_ratio": vispruner_run[0]["important_ratio"],
+                "vispruner_valid_macro_f1_mean": vispruner["valid_macro_f1_at_0.5_mean"],
+                "vispruner_mlp_seed_sd": vispruner["valid_macro_f1_at_0.5_sd"],
+                "vispruner_minus_divprune_macro_f1": (
+                    float(vispruner["valid_macro_f1_at_0.5_mean"])
+                    - float(div["valid_macro_f1_at_0.5_mean"])
+                ),
+                "vispruner_valid_mean_end_to_end_seconds": vispruner["valid_mean_end_to_end_seconds"],
+                "vispruner_valid_peak_allocated_gib": vispruner["valid_peak_total_allocated_gib_mean"],
+                "vispruner_valid_theoretical_forward_tflops": vispruner["valid_theoretical_forward_tflops_mean"],
+            })
         output_rows.append(result)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -138,7 +160,8 @@ def main() -> int:
         writer.writerows(output_rows)
     print(f"Wrote {len(output_rows)} matched validation-budget rows to {args.output_csv}")
     if any(config.get("code_revision") != div_config.get("code_revision")
-           for config, _, _ in random_runs + ([uniform_run] if uniform_run else [])):
+           for config, _, _ in random_runs + ([uniform_run] if uniform_run else [])
+           + ([vispruner_run] if vispruner_run else [])):
         print("Code revisions differ; verify that the shared extraction and MLP paths did not change.")
     if random_runs and len(random_runs) < 3:
         print("For a paper claim, run at least three independent random extraction seeds.")

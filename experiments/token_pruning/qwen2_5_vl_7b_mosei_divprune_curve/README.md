@@ -11,7 +11,7 @@ with seven-class MELD macro F1.
 
 - Local checkpoint: `Qwen/Qwen2.5-VL-7B-Instruct`. No model downloads occur in the
   GPU job. The launcher verifies the local checkpoint and complete MOSEI copy.
-- Shared [video protocol](../../../cluster/mosei_video_protocol.json): 448 × 448,
+- Shared [video protocol](../../../cluster/mosei_video_protocol.json): 224 × 224,
   6 FPS, 4–64 frames, segment transcript, and the same prompt and last-token
   embedding as the full baseline.
 - DivPrune selects a deterministic max-min cosine-diverse subset of the

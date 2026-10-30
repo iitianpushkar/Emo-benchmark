@@ -2,7 +2,7 @@
 
 This is a **planned, unrun** control for the [DivPrune retention curve](../qwen2_5_vl_7b_mosei_divprune_curve/README.md).
 It uses the same Qwen2.5-VL-7B checkpoint, MOSEI train/validation/test
-indexes, 448 × 448 video frames at 6 FPS, 4–64 frames per clip, transcript,
+indexes, 224 × 224 video frames at 6 FPS, 4–64 frames per clip, transcript,
 last-token embedding, and matched six-label MLP training. It tests the same
 13 requested projected video-token retention ratios from 100% to 5%.
 

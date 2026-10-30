@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
 from cluster.qwen_cost import profile_forward_flops  # noqa: E402
+from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture  # noqa: E402
 from scripts.pruning.random_prune import sample_seed  # noqa: E402
 
 
@@ -52,7 +54,9 @@ def main():
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--retain-ratio", type=float, default=1.0,
                         help="Fraction of projected video tokens retained; 1 is unpruned")
-    parser.add_argument("--pruning", choices=("divprune", "random", "uniform"), default="divprune")
+    parser.add_argument("--pruning", choices=("divprune", "random", "uniform", "vispruner"), default="divprune")
+    parser.add_argument("--important-ratio", type=float, default=0.5,
+                        help="VisPruner fraction of kept tokens selected by vision attention")
     parser.add_argument("--random-seed", type=int, default=42,
                         help="Base seed for sample-ID-stable random token selection")
     parser.add_argument("--profile-stride", type=int, default=0,
@@ -68,6 +72,8 @@ def main():
         parser.error("--retain-ratio must be in (0, 1]")
     if args.random_seed < 0:
         parser.error("--random-seed must be nonnegative")
+    if not 0 <= args.important_ratio <= 1:
+        parser.error("--important-ratio must be in [0, 1]")
 
     with args.index_csv.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))[args.start:args.start + args.limit]
@@ -77,6 +83,7 @@ def main():
     log(f"Starting extraction: index={args.index_csv} rows={args.start}:{args.start + args.limit} "
         f"retention={args.retain_ratio:.0%} pruning={args.pruning} "
         f"random_seed={args.random_seed if args.pruning == 'random' else 'n/a'} "
+        f"important_ratio={args.important_ratio if args.pruning == 'vispruner' else 'n/a'} "
         f"output={args.output_pt}")
     import torch
     from qwen_vl_utils import process_vision_info
@@ -91,6 +98,9 @@ def main():
               "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
     if args.pruning == "random":
         config["random_seed"] = args.random_seed
+    if args.pruning == "vispruner":
+        config["important_ratio"] = args.important_ratio
+        config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -172,9 +182,12 @@ def main():
             baseline_allocated = torch.cuda.memory_allocated(model.device)
             torch.cuda.reset_peak_memory_stats(model.device)
             forward_started = time.perf_counter()
-            with torch.inference_mode(), DivPruneHook(
+            attention = (QwenVisionAttentionCapture(model, inputs["video_grid_thw"])
+                         if args.pruning == "vispruner" and args.retain_ratio < 1 else nullcontext())
+            with torch.inference_mode(), attention as vision_attention, DivPruneHook(
                 model, inputs["input_ids"], args.retain_ratio,
                 method=args.pruning, random_seed=pruning_seed,
+                vision_attention=vision_attention, important_ratio=args.important_ratio,
             ) as pruning:
                 output = model.model(**inputs, use_cache=False, return_dict=True)
                 embedding = output.last_hidden_state[0, -1].float().cpu()
@@ -192,6 +205,7 @@ def main():
                 flops_profile = profile_forward_flops(
                     model, inputs, inputs["input_ids"], args.retain_ratio,
                     method=args.pruning, random_seed=pruning_seed,
+                    important_ratio=args.important_ratio,
                 )
                 log(f"FLOP profile complete for {sample_id}")
             embeddings.append(embedding)

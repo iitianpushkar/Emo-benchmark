@@ -10,7 +10,8 @@ FLOP_PROFILE_TARGET = 128
 
 
 def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
-                          method: str = "divprune", random_seed: int | None = None) -> dict:
+                          method: str = "divprune", random_seed: int | None = None,
+                          important_ratio: float = 0.5) -> dict:
     """Count theoretical FLOPs on a separate, identically configured forward."""
     import torch
     try:
@@ -19,11 +20,18 @@ def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
         raise RuntimeError("PyTorch >=2.5.1 with FlopCounterMode is required for TFLOPs reporting") from exc
 
     from cluster.qwen2_5_divprune import DivPruneHook
+    from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture
+    from contextlib import nullcontext
 
     torch.cuda.synchronize(model.device)
+    attention = (QwenVisionAttentionCapture(model, inputs["video_grid_thw"])
+                 if method == "vispruner" and retain_ratio < 1 else nullcontext())
     with torch.inference_mode(), FlopCounterMode(display=False) as counter:
-        with DivPruneHook(model, input_ids, retain_ratio, method=method,
-                          random_seed=random_seed):
+        with attention as vision_attention, DivPruneHook(
+            model, input_ids, retain_ratio, method=method,
+            random_seed=random_seed, vision_attention=vision_attention,
+            important_ratio=important_ratio,
+        ):
             output = model.model(**inputs, use_cache=False, return_dict=True)
             _ = output.last_hidden_state[0, -1].float().cpu()
         torch.cuda.synchronize(model.device)
@@ -35,8 +43,8 @@ def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
         "theoretical_forward_tflops": total_flops / 1e12,
         "operator_flops": operator_flops,
         "counted_operator_kinds": len(operator_flops),
-        "scope": "vision_encoder_plus_language_model_forward",
-        "coverage": "PyTorch FlopCounterMode shape formulas; includes registered matmul, convolution and attention, excludes unregistered/pointwise work and is not a hardware counter",
+        "scope": "vision_encoder_plus_pruning_selector_plus_language_model_forward",
+        "coverage": "PyTorch FlopCounterMode shape formulas; includes registered matmul, convolution and attention (including selector work where registered), excludes unregistered/pointwise work and is not a hardware counter",
     }
 
 

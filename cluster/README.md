@@ -225,7 +225,7 @@ the six independent MOSEI emotion labels. Check the input paths on the login
 node before requesting an H100 job:
 
 The shared [MOSEI video protocol](mosei_video_protocol.json) specifies
-448 × 448 frames, 6 FPS, and 4–64 frames per clip for the size-matched VLM
+224 × 224 frames, 6 FPS, and 4–64 frames per clip for the size-matched VLM
 comparisons. Each model should receive the same segment transcript and use the
 same train/valid/test indexes and six-label classifier procedure. The Qwen2.5
 extractor records actual frame dimensions and counts in its metadata.
@@ -410,3 +410,12 @@ python cluster/run_mosei_uniform_curve.py --root ../..
 Outputs go to `../../results/qwen2_5_vl_7b_mosei_uniform_curve/`; follow
 `run.log` there. The uniform protocol includes a one-clip H100 smoke command
 and a comparison command for DivPrune, random, and uniform curves.
+
+## 7. Qwen-adapted VisPruner curve
+
+The [VisPruner protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_vispruner_curve/README.md)
+uses vision attention and iterative feature deduplication at the same 224 × 224,
+6 FPS, 100%–5% retention budgets. Run `--verify-only` on the login node, then
+use `python cluster/run_mosei_vispruner_curve.py --root ../..` on a GPU node.
+Its resumable progress is visible in
+`../../results/qwen2_5_vl_7b_mosei_vispruner_curve/run.log`.

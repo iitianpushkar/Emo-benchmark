@@ -2,7 +2,7 @@
   "fps": 6,
   "min_frames": 4,
   "max_frames": 64,
-  "frame_size": 448,
+  "frame_size": 224,
   "frame_shape": "square",
   "transcript": "segment_text",
   "prompt_style": "utterance_only"

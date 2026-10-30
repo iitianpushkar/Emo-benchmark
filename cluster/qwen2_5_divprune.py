@@ -7,20 +7,24 @@ import torch
 from scripts.pruning.divprune import build_divprune_sequence_indices
 from scripts.pruning.random_prune import build_random_prune_sequence_indices
 from scripts.pruning.uniform_prune import build_uniform_prune_sequence_indices
+from scripts.pruning.vispruner import build_vispruner_sequence_indices, DEFAULT_IMPORTANT_RATIO
 
 
 class DivPruneHook:
     """Preserve selected video embeddings and their original multimodal positions."""
 
     def __init__(self, model, input_ids: torch.Tensor, retain_ratio: float,
-                 method: str = "divprune", random_seed: int | None = None):
+                 method: str = "divprune", random_seed: int | None = None,
+                 vision_attention=None, important_ratio: float = DEFAULT_IMPORTANT_RATIO):
         if not 0 < retain_ratio <= 1:
             raise ValueError("retain_ratio must be in (0, 1]")
-        if method not in ("divprune", "random", "uniform"):
+        if method not in ("divprune", "random", "uniform", "vispruner"):
             raise ValueError(f"Unknown token pruning method: {method}")
         if method == "random" and random_seed is None:
             raise ValueError("Random token pruning requires a per-sample seed")
         self.method = method
+        self.vision_attention = vision_attention
+        self.important_ratio = important_ratio
         self.random_seed = random_seed
         self.retain_ratio = retain_ratio
         self.video_mask = input_ids.eq(model.config.video_token_id)
@@ -68,6 +72,13 @@ class DivPruneHook:
         elif self.method == "uniform":
             keep, selected = build_uniform_prune_sequence_indices(
                 embeds, video_mask, positions, self.retain_ratio,
+            )
+        elif self.method == "vispruner":
+            scores = None if self.vision_attention is None else self.vision_attention.scores
+            if scores is None or scores.numel() != self.full_tokens:
+                raise ValueError("VisPruner requires aligned Qwen vision attention scores")
+            keep, selected = build_vispruner_sequence_indices(
+                embeds, video_mask, scores, self.retain_ratio, self.important_ratio,
             )
         else:
             keep, selected = build_divprune_sequence_indices(embeds, video_mask, self.retain_ratio)
