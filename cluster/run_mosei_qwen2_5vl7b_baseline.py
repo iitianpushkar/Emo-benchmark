@@ -123,7 +123,7 @@ def main() -> int:
                         help="Print extraction progress every N new clips")
     parser.add_argument("--save-every", type=int, default=25,
                         help="Checkpoint embeddings every N new clips")
-    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
+    parser.add_argument("--decode-timeout-seconds", type=float, default=10,
                         help="Skip clips whose Decord decode exceeds this many seconds")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()

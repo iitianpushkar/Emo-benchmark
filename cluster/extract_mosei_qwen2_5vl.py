@@ -69,8 +69,8 @@ def main():
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--log-every", type=int, default=1,
                         help="Print clip progress every N new attempts (default: 1)")
-    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
-                        help="Skip a clip if its Decord worker takes longer than this (default: 60)")
+    parser.add_argument("--decode-timeout-seconds", type=float, default=10,
+                        help="Skip a clip if its Decord worker takes longer than this (default: 10)")
     args = parser.parse_args()
     if (args.start < 0 or args.limit <= 0 or args.save_every <= 0
             or args.log_every <= 0 or args.profile_stride < 0

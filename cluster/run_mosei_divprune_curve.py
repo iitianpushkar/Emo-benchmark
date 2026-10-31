@@ -208,7 +208,7 @@ def main(method: str = "divprune") -> int:
                         help="Print extraction progress every N new clips")
     parser.add_argument("--save-every", type=int, default=25,
                         help="Checkpoint embeddings every N new clips")
-    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
+    parser.add_argument("--decode-timeout-seconds", type=float, default=10,
                         help="Skip clips whose Decord decode exceeds this many seconds")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--test-all", action="store_true",

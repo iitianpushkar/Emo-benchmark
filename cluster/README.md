@@ -326,7 +326,7 @@ The extractor reports model loading, each FLOP profile, clip counts, elapsed
 time, estimated remaining time, errors, and chunk saves. It reports every
 newly attempted clip by default; `--log-every 5` reduces output volume.
 Video decoding stays on Decord in a separate CPU worker. If a clip's decode
-exceeds 60 seconds, the worker is killed and restarted, the clip ID and timeout
+exceeds 10 seconds, the worker is killed and restarted, the clip ID and timeout
 are recorded in the chunk's `errors`, and extraction continues with the next
 clip. Set `--decode-timeout-seconds N` on the launcher to change the limit.
 This is an operational timeout; extraction continues to the end of the current
