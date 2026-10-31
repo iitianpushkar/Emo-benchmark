@@ -3,6 +3,7 @@ from pathlib import Path
 
 SCRIPT_PATHS = {
     "prepare_meld.py": "data/prepare_meld.py",
+    "prepare_mosei.py": "data/prepare_mosei.py",
     "download_mer2024.py": "data/download_mer2024.py",
     "prepare_mer2024.py": "data/prepare_mer2024.py",
     "export_mosei_csd.py": "data/export_mosei_csd.py",
@@ -17,6 +18,8 @@ SCRIPT_PATHS = {
     "run_smolvlm2_chunks.py": "extraction/run_smolvlm2_chunks.py",
     "merge_embedding_chunks.py": "extraction/merge_embedding_chunks.py",
     "train_mlp.py": "classification/train_mlp.py",
+    "run_mosei_tfidf.py": "classification/run_mosei_tfidf.py",
+    "mosei_mlp.py": "classification/mosei_mlp.py",
     "evaluate_mlp.py": "classification/evaluate_mlp.py",
     "divprune.py": "pruning/divprune.py",
     "random_prune.py": "pruning/random_prune.py",

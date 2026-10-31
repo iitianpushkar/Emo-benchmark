@@ -21,6 +21,7 @@ Browse by research question. Each run keeps its notebooks, configuration, and av
 | [qwen2_5_vl_3b_shared](baselines/qwen2_5_vl_3b_shared/README.md) | chunks, embeddings, outputs, results |
 | [qwen2_5_vl_3b_visual_only](baselines/qwen2_5_vl_3b_visual_only/README.md) | config.yaml |
 | [tdv_dino_ibot](baselines/tdv_dino_ibot/README.md) | notebooks |
+| [mosei_tfidf_text](baselines/mosei_tfidf_text/README.md) | full-data six-emotion transcript baseline, metrics, predictions |
 | [qwen2_5_vl_3b_divprune_030](token_pruning/qwen2_5_vl_3b_divprune_030/README.md) | checkpoints |
 | [qwen2_5_vl_3b_dinov2_base_frames_020](frame_pruning/qwen2_5_vl_3b_dinov2_base_frames_020/README.md) | embeddings |
 | [qwen2_5_vl_3b_dinov2_050_divprune_target_015](combined_pruning/qwen2_5_vl_3b_dinov2_050_divprune_target_015/README.md) | notebook (50% frames; 15% combined visual-token target; results not yet run) |

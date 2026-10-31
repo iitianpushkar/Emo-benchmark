@@ -8,6 +8,7 @@ from scripts.pruning.divprune import build_divprune_sequence_indices
 from scripts.pruning.random_prune import build_random_prune_sequence_indices
 from scripts.pruning.uniform_prune import build_uniform_prune_sequence_indices
 from scripts.pruning.vispruner import build_vispruner_sequence_indices, DEFAULT_IMPORTANT_RATIO
+from scripts.pruning.visionzip import build_visionzip_sequence
 
 
 class DivPruneHook:
@@ -18,7 +19,7 @@ class DivPruneHook:
                  vision_attention=None, important_ratio: float = DEFAULT_IMPORTANT_RATIO):
         if not 0 < retain_ratio <= 1:
             raise ValueError("retain_ratio must be in (0, 1]")
-        if method not in ("divprune", "random", "uniform", "vispruner"):
+        if method not in ("divprune", "random", "uniform", "vispruner", "visionzip"):
             raise ValueError(f"Unknown token pruning method: {method}")
         if method == "random" and random_seed is None:
             raise ValueError("Random token pruning requires a per-sample seed")
@@ -34,6 +35,8 @@ class DivPruneHook:
             raise ValueError("Qwen2.5 input contains no expanded video tokens")
         self.retained_tokens = self.full_tokens
         self.retained_sequence_tokens = self.full_sequence_tokens
+        self.visionzip_dominant_tokens = None
+        self.visionzip_contextual_tokens = None
         self.calls = 0
         self.handle = None
         self.language_model = model.model.language_model
@@ -80,6 +83,16 @@ class DivPruneHook:
             keep, selected = build_vispruner_sequence_indices(
                 embeds, video_mask, scores, self.retain_ratio, self.important_ratio,
             )
+        elif self.method == "visionzip":
+            scores = None if self.vision_attention is None else self.vision_attention.scores
+            keys = None if self.vision_attention is None else self.vision_attention.keys
+            if scores is None or keys is None:
+                raise ValueError("VisionZip requires aligned Qwen vision attention scores and keys")
+            embeds, keep, selected, dominant, contextual = build_visionzip_sequence(
+                embeds, video_mask, positions, scores, keys, self.retain_ratio,
+            )
+            self.visionzip_dominant_tokens = dominant
+            self.visionzip_contextual_tokens = contextual
         else:
             keep, selected = build_divprune_sequence_indices(embeds, video_mask, self.retain_ratio)
         self.retained_tokens = int(selected.numel())

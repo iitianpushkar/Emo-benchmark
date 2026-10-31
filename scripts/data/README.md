@@ -5,6 +5,7 @@ Prepare MELD indexes and conflict datasets.
 | Module | Description |
 |---|---|
 | [prepare_meld.py](prepare_meld.py) | Build clean MELD split indexes with verified video paths. |
+| [prepare_mosei.py](prepare_mosei.py) | Build verified CMU-MOSEI train/valid/test indexes with six binary emotion labels. |
 | [download_mer2024.py](download_mer2024.py) | Download the gated MER2024 labeled videos and metadata. |
 | [prepare_mer2024.py](prepare_mer2024.py) | Build deterministic, transcript-complete MER2024 train/dev indexes with verified video paths. |
 | [export_mosei_csd.py](export_mosei_csd.py) | Export CMU-MOSEI labels, timestamped words, and reconstructed segment transcripts from CSD to CSV. |

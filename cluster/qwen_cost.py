@@ -11,7 +11,7 @@ FLOP_PROFILE_TARGET = 128
 
 def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
                           method: str = "divprune", random_seed: int | None = None,
-                          important_ratio: float = 0.5) -> dict:
+                          important_ratio: float = 0.5, fastv_k: int = 2) -> dict:
     """Count theoretical FLOPs on a separate, identically configured forward."""
     import torch
     try:
@@ -20,20 +20,29 @@ def profile_forward_flops(model, inputs, input_ids, retain_ratio: float,
         raise RuntimeError("PyTorch >=2.5.1 with FlopCounterMode is required for TFLOPs reporting") from exc
 
     from cluster.qwen2_5_divprune import DivPruneHook
-    from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture
+    from cluster.qwen_fastv import FastVHook
+    from cluster.qwen_sparsevlm import SparseVLMHook
+    from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture, QwenVisionZipCapture
     from contextlib import nullcontext
 
     torch.cuda.synchronize(model.device)
     attention = (QwenVisionAttentionCapture(model, inputs["video_grid_thw"])
-                 if method == "vispruner" and retain_ratio < 1 else nullcontext())
+                 if method == "vispruner" and retain_ratio < 1 else
+                 QwenVisionZipCapture(model, inputs["video_grid_thw"])
+                 if method == "visionzip" and retain_ratio < 1 else nullcontext())
     with torch.inference_mode(), FlopCounterMode(display=False) as counter:
-        with attention as vision_attention, DivPruneHook(
-            model, input_ids, retain_ratio, method=method,
-            random_seed=random_seed, vision_attention=vision_attention,
-            important_ratio=important_ratio,
-        ):
-            output = model.model(**inputs, use_cache=False, return_dict=True)
-            _ = output.last_hidden_state[0, -1].float().cpu()
+        with attention as vision_attention:
+            pruning_context = (FastVHook(model, input_ids, retain_ratio, fastv_k)
+                               if method == "fastv" else
+                               SparseVLMHook(model, input_ids, retain_ratio)
+                               if method == "sparsevlm" else DivPruneHook(
+                                   model, input_ids, retain_ratio, method=method,
+                                   random_seed=random_seed, vision_attention=vision_attention,
+                                   important_ratio=important_ratio,
+                               ))
+            with pruning_context:
+                output = model.model(**inputs, use_cache=False, return_dict=True)
+                _ = output.last_hidden_state[0, -1].float().cpu()
         torch.cuda.synchronize(model.device)
     operator_flops = {str(op): int(flops) for op, flops in counter.get_flop_counts().get("Global", {}).items()}
     total_flops = int(counter.get_total_flops())
@@ -75,6 +84,7 @@ def summarize_embedding_cost(path: Path, ratio: float, expected: int) -> dict:
     incremental_peak = []
     flop_samples = []
     profiled_ids = []
+    sparsevlm_stage_outputs = None
     for sample_id, item in zip(payload["sample_ids"], metadata):
         n = int(item["full_visual_tokens"])
         k = int(item["retained_visual_tokens"])
@@ -88,6 +98,15 @@ def summarize_embedding_cost(path: Path, ratio: float, expected: int) -> dict:
             raise ValueError(f"{path}: full-sequence token count disagrees with video-token pruning")
         full_sequence += seq_n
         retained_sequence += seq_k
+        stages = item.get("sparsevlm_stages")
+        if stages:
+            outputs = [int(stage["output_visual_tokens"]) for stage in stages]
+            if len(outputs) != 3 or outputs[-1] != k:
+                raise ValueError(f"{path}: invalid SparseVLM stage token counts")
+            if sparsevlm_stage_outputs is None:
+                sparsevlm_stage_outputs = [0, 0, 0]
+            for stage_index, output_tokens in enumerate(outputs):
+                sparsevlm_stage_outputs[stage_index] += output_tokens
         for key in latency:
             value = float(item[key])
             if not math.isfinite(value) or value <= 0:
@@ -110,6 +129,10 @@ def summarize_embedding_cost(path: Path, ratio: float, expected: int) -> dict:
         "mean_retained_visual_tokens_per_clip": retained / expected,
         "mean_full_sequence_tokens_per_clip": full_sequence / expected,
         "mean_retained_sequence_tokens_per_clip": retained_sequence / expected,
+        "sparsevlm_mean_stage_output_visual_tokens": (
+            [count / expected for count in sparsevlm_stage_outputs]
+            if sparsevlm_stage_outputs is not None else None
+        ),
         "latency_seconds_per_clip": {key: _distribution(values) for key, values in latency.items()},
         "peak_total_allocated_gib": _distribution([value / 2**30 for value in peak_allocated]),
         "peak_total_reserved_gib": _distribution([value / 2**30 for value in peak_reserved]),

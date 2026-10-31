@@ -419,3 +419,31 @@ uses vision attention and iterative feature deduplication at the same 224 × 224
 use `python cluster/run_mosei_vispruner_curve.py --root ../..` on a GPU node.
 Its resumable progress is visible in
 `../../results/qwen2_5_vl_7b_mosei_vispruner_curve/run.log`.
+
+The [VisionZip protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_visionzip_curve/README.md)
+adapts the authors' Qwen2.5 image code to MOSEI video, retaining dominant
+tokens and merging contextual tokens within temporal groups. Run
+`python cluster/run_mosei_visionzip_curve.py --root ../.. --verify-only` on the
+login node, then remove `--verify-only` in the GPU job. Follow
+`../../results/qwen2_5_vl_7b_mosei_visionzip_curve/run.log` for live progress.
+
+## 8. Qwen-adapted FastV curve
+
+The [FastV protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_fastv_curve/README.md)
+uses the official last-prompt-query attention rule after two decoder layers,
+then drops low-attention video tokens before the remaining decoder layers.
+It shares the 224 × 224, 6 FPS MOSEI protocol and 100%–5% retention grid.
+Run `python cluster/run_mosei_fastv_curve.py --root ../.. --verify-only` on
+the login node, then run without `--verify-only` on a GPU node. Follow
+`../../results/qwen2_5_vl_7b_mosei_fastv_curve/run.log` for live progress.
+
+## 9. Qwen-adapted SparseVLM curve
+
+The [SparseVLM-style protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_sparsevlm_curve/README.md)
+uses selected text-token attention and matrix-rank-based deletion counts at
+three decoder layers, and recycles
+clustered discarded tokens. It uses the same 224 × 224, 6 FPS MOSEI inputs and
+100%–5% final visual-token budgets. Run
+`python cluster/run_mosei_sparsevlm_curve.py --root ../.. --verify-only` on the
+login node, smoke test one clip on the GPU, then run the curve on a GPU node.
+Follow `../../results/qwen2_5_vl_7b_mosei_sparsevlm_curve/run.log`.

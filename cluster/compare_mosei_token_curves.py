@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare matched MOSEI DivPrune, random, uniform, and VisPruner curves."""
+"""Compare matched MOSEI DivPrune, random, uniform, VisPruner, FastV, and SparseVLM curves."""
 
 from __future__ import annotations
 
@@ -50,15 +50,24 @@ def main() -> int:
                         help="Deterministic temporal-stratified uniform curve")
     parser.add_argument("--vispruner-dir", type=Path,
                         help="Qwen-adapted VisPruner attention/diversity curve")
+    parser.add_argument("--visionzip-dir", type=Path,
+                        help="Qwen-adapted VisionZip dominant/contextual curve")
+    parser.add_argument("--fastv-dir", type=Path,
+                        help="Qwen-adapted FastV in-decoder pruning curve")
+    parser.add_argument("--sparsevlm-dir", type=Path,
+                        help="Qwen-adapted SparseVLM progressive pruning curve")
     parser.add_argument("--output-csv", type=Path, required=True)
     args = parser.parse_args()
-    if not args.random_dirs and not args.uniform_dir and not args.vispruner_dir:
+    if not args.random_dirs and not args.uniform_dir and not args.vispruner_dir and not args.visionzip_dir and not args.fastv_dir and not args.sparsevlm_dir:
         parser.error("Supply at least one comparison curve")
 
     div_config, div_rows, div_costs = read_run(args.divprune_dir)
     random_runs = [read_run(folder) for folder in (args.random_dirs or [])]
     uniform_run = read_run(args.uniform_dir) if args.uniform_dir else None
     vispruner_run = read_run(args.vispruner_dir) if args.vispruner_dir else None
+    visionzip_run = read_run(args.visionzip_dir) if args.visionzip_dir else None
+    fastv_run = read_run(args.fastv_dir) if args.fastv_dir else None
+    sparsevlm_run = read_run(args.sparsevlm_dir) if args.sparsevlm_dir else None
     random_seeds = [config.get("random_seed") for config, _, _ in random_runs]
     if None in random_seeds or len(set(random_seeds)) != len(random_seeds):
         raise ValueError("Random run directories must have distinct extraction seeds")
@@ -77,6 +86,18 @@ def main() -> int:
         if "VisPruner" not in vispruner_run[0]["method"]:
             raise ValueError(f"{args.vispruner_dir} does not contain a VisPruner curve")
         verify_match(args.vispruner_dir, vispruner_run, div_config, div_rows, div_costs)
+    if visionzip_run:
+        if "VisionZip" not in visionzip_run[0]["method"]:
+            raise ValueError(f"{args.visionzip_dir} does not contain a VisionZip curve")
+        verify_match(args.visionzip_dir, visionzip_run, div_config, div_rows, div_costs)
+    if fastv_run:
+        if "FastV" not in fastv_run[0]["method"]:
+            raise ValueError(f"{args.fastv_dir} does not contain a FastV curve")
+        verify_match(args.fastv_dir, fastv_run, div_config, div_rows, div_costs)
+    if sparsevlm_run:
+        if "SparseVLM" not in sparsevlm_run[0]["method"]:
+            raise ValueError(f"{args.sparsevlm_dir} does not contain a SparseVLM curve")
+        verify_match(args.sparsevlm_dir, sparsevlm_run, div_config, div_rows, div_costs)
 
     output_rows = []
     for ratio in sorted(div_rows):
@@ -152,6 +173,49 @@ def main() -> int:
                 "vispruner_valid_peak_allocated_gib": vispruner["valid_peak_total_allocated_gib_mean"],
                 "vispruner_valid_theoretical_forward_tflops": vispruner["valid_theoretical_forward_tflops_mean"],
             })
+        if visionzip_run:
+            visionzip = visionzip_run[1][ratio]
+            result.update({
+                "visionzip_code_revision": visionzip_run[0].get("code_revision"),
+                "visionzip_valid_macro_f1_mean": visionzip["valid_macro_f1_at_0.5_mean"],
+                "visionzip_mlp_seed_sd": visionzip["valid_macro_f1_at_0.5_sd"],
+                "visionzip_minus_divprune_macro_f1": (
+                    float(visionzip["valid_macro_f1_at_0.5_mean"])
+                    - float(div["valid_macro_f1_at_0.5_mean"])
+                ),
+                "visionzip_valid_mean_end_to_end_seconds": visionzip["valid_mean_end_to_end_seconds"],
+                "visionzip_valid_peak_allocated_gib": visionzip["valid_peak_total_allocated_gib_mean"],
+                "visionzip_valid_theoretical_forward_tflops": visionzip["valid_theoretical_forward_tflops_mean"],
+            })
+        if fastv_run:
+            fastv = fastv_run[1][ratio]
+            result.update({
+                "fastv_code_revision": fastv_run[0].get("code_revision"),
+                "fastv_k": fastv_run[0]["fastv_k"],
+                "fastv_valid_macro_f1_mean": fastv["valid_macro_f1_at_0.5_mean"],
+                "fastv_mlp_seed_sd": fastv["valid_macro_f1_at_0.5_sd"],
+                "fastv_minus_divprune_macro_f1": (
+                    float(fastv["valid_macro_f1_at_0.5_mean"])
+                    - float(div["valid_macro_f1_at_0.5_mean"])
+                ),
+                "fastv_valid_mean_end_to_end_seconds": fastv["valid_mean_end_to_end_seconds"],
+                "fastv_valid_peak_allocated_gib": fastv["valid_peak_total_allocated_gib_mean"],
+                "fastv_valid_theoretical_forward_tflops": fastv["valid_theoretical_forward_tflops_mean"],
+            })
+        if sparsevlm_run:
+            sparsevlm = sparsevlm_run[1][ratio]
+            result.update({
+                "sparsevlm_code_revision": sparsevlm_run[0].get("code_revision"),
+                "sparsevlm_valid_macro_f1_mean": sparsevlm["valid_macro_f1_at_0.5_mean"],
+                "sparsevlm_mlp_seed_sd": sparsevlm["valid_macro_f1_at_0.5_sd"],
+                "sparsevlm_minus_divprune_macro_f1": (
+                    float(sparsevlm["valid_macro_f1_at_0.5_mean"])
+                    - float(div["valid_macro_f1_at_0.5_mean"])
+                ),
+                "sparsevlm_valid_mean_end_to_end_seconds": sparsevlm["valid_mean_end_to_end_seconds"],
+                "sparsevlm_valid_peak_allocated_gib": sparsevlm["valid_peak_total_allocated_gib_mean"],
+                "sparsevlm_valid_theoretical_forward_tflops": sparsevlm["valid_theoretical_forward_tflops_mean"],
+            })
         output_rows.append(result)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -161,7 +225,10 @@ def main() -> int:
     print(f"Wrote {len(output_rows)} matched validation-budget rows to {args.output_csv}")
     if any(config.get("code_revision") != div_config.get("code_revision")
            for config, _, _ in random_runs + ([uniform_run] if uniform_run else [])
-           + ([vispruner_run] if vispruner_run else [])):
+           + ([vispruner_run] if vispruner_run else [])
+           + ([visionzip_run] if visionzip_run else [])
+           + ([fastv_run] if fastv_run else [])
+           + ([sparsevlm_run] if sparsevlm_run else [])):
         print("Code revisions differ; verify that the shared extraction and MLP paths did not change.")
     if random_runs and len(random_runs) < 3:
         print("For a paper claim, run at least three independent random extraction seeds.")

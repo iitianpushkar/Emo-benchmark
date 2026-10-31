@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
 from cluster.qwen_cost import profile_forward_flops  # noqa: E402
-from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture  # noqa: E402
+from cluster.qwen_fastv import FastVHook  # noqa: E402
+from cluster.qwen_sparsevlm import SparseVLMHook  # noqa: E402
+from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture, QwenVisionZipCapture  # noqa: E402
 from scripts.pruning.random_prune import sample_seed  # noqa: E402
 
 
@@ -54,7 +56,9 @@ def main():
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--retain-ratio", type=float, default=1.0,
                         help="Fraction of projected video tokens retained; 1 is unpruned")
-    parser.add_argument("--pruning", choices=("divprune", "random", "uniform", "vispruner"), default="divprune")
+    parser.add_argument("--pruning", choices=("divprune", "random", "uniform", "vispruner", "visionzip", "fastv", "sparsevlm"), default="divprune")
+    parser.add_argument("--fastv-k", type=int, default=2,
+                        help="FastV decoder layers processed before pruning (default: 2)")
     parser.add_argument("--important-ratio", type=float, default=0.5,
                         help="VisPruner fraction of kept tokens selected by vision attention")
     parser.add_argument("--random-seed", type=int, default=42,
@@ -74,6 +78,8 @@ def main():
         parser.error("--random-seed must be nonnegative")
     if not 0 <= args.important_ratio <= 1:
         parser.error("--important-ratio must be in [0, 1]")
+    if args.fastv_k < 1:
+        parser.error("--fastv-k must be positive")
 
     with args.index_csv.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))[args.start:args.start + args.limit]
@@ -84,6 +90,7 @@ def main():
         f"retention={args.retain_ratio:.0%} pruning={args.pruning} "
         f"random_seed={args.random_seed if args.pruning == 'random' else 'n/a'} "
         f"important_ratio={args.important_ratio if args.pruning == 'vispruner' else 'n/a'} "
+        f"fastv_k={args.fastv_k if args.pruning == 'fastv' else 'n/a'} "
         f"output={args.output_pt}")
     import torch
     from qwen_vl_utils import process_vision_info
@@ -93,7 +100,10 @@ def main():
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
               "limit": args.limit, "video_protocol": video_protocol,
               "pooling": "last_token", "layer": -1, "modality": "video_text",
-              "pruning": (f"{args.pruning}_projected_video_tokens"
+              "pruning": ((f"fastv_after_layer_{args.fastv_k}_video_tokens"
+                           if args.pruning == "fastv" else
+                           "sparsevlm_progressive_decoder_video_tokens" if args.pruning == "sparsevlm"
+                           else f"{args.pruning}_projected_video_tokens")
                           if args.retain_ratio < 1 else "none"),
               "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
     if args.pruning == "random":
@@ -101,6 +111,17 @@ def main():
     if args.pruning == "vispruner":
         config["important_ratio"] = args.important_ratio
         config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
+    if args.pruning == "visionzip":
+        config["attention_source"] = "last_full_qwen_vision_block_received_attention_and_keys"
+        config["merging"] = "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
+    if args.pruning == "fastv":
+        config["fastv_k"] = args.fastv_k
+        config["attention_source"] = "last_prompt_query_after_k_decoder_layers"
+    if args.pruning == "sparsevlm":
+        config["sparsevlm_stages"] = [2, 6, 15]
+        config["sparsevlm_schedule"] = "matrix_rank_lambda_geometric_with_final_budget_cap_v1"
+        config["attention_source"] = "selected_post_video_text_queries_at_decoder_stages"
+        config["recycling"] = "top_30_percent_discarded_then_density_cluster_mean"
     embeddings, ids, metadata, errors = [], [], [], []
     if args.output_pt.is_file():
         payload = torch.load(args.output_pt, map_location="cpu", weights_only=False)
@@ -183,14 +204,21 @@ def main():
             torch.cuda.reset_peak_memory_stats(model.device)
             forward_started = time.perf_counter()
             attention = (QwenVisionAttentionCapture(model, inputs["video_grid_thw"])
-                         if args.pruning == "vispruner" and args.retain_ratio < 1 else nullcontext())
-            with torch.inference_mode(), attention as vision_attention, DivPruneHook(
-                model, inputs["input_ids"], args.retain_ratio,
-                method=args.pruning, random_seed=pruning_seed,
-                vision_attention=vision_attention, important_ratio=args.important_ratio,
-            ) as pruning:
-                output = model.model(**inputs, use_cache=False, return_dict=True)
-                embedding = output.last_hidden_state[0, -1].float().cpu()
+                         if args.pruning == "vispruner" and args.retain_ratio < 1 else
+                         QwenVisionZipCapture(model, inputs["video_grid_thw"])
+                         if args.pruning == "visionzip" and args.retain_ratio < 1 else nullcontext())
+            with torch.inference_mode(), attention as vision_attention:
+                pruning_context = (FastVHook(model, inputs["input_ids"], args.retain_ratio, args.fastv_k)
+                                   if args.pruning == "fastv" else
+                                   SparseVLMHook(model, inputs["input_ids"], args.retain_ratio)
+                                   if args.pruning == "sparsevlm" else DivPruneHook(
+                                       model, inputs["input_ids"], args.retain_ratio,
+                                       method=args.pruning, random_seed=pruning_seed,
+                                       vision_attention=vision_attention, important_ratio=args.important_ratio,
+                                   ))
+                with pruning_context as pruning:
+                    output = model.model(**inputs, use_cache=False, return_dict=True)
+                    embedding = output.last_hidden_state[0, -1].float().cpu()
             torch.cuda.synchronize(model.device)
             forward_ended = time.perf_counter()
             peak_allocated = torch.cuda.max_memory_allocated(model.device)
@@ -206,6 +234,7 @@ def main():
                     model, inputs, inputs["input_ids"], args.retain_ratio,
                     method=args.pruning, random_seed=pruning_seed,
                     important_ratio=args.important_ratio,
+                    fastv_k=args.fastv_k,
                 )
                 log(f"FLOP profile complete for {sample_id}")
             embeddings.append(embedding)
@@ -218,6 +247,9 @@ def main():
                              "full_sequence_tokens": pruning.full_sequence_tokens,
                              "retained_sequence_tokens": pruning.retained_sequence_tokens,
                              "actual_retain_ratio": pruning.retained_tokens / pruning.full_tokens,
+                             "visionzip_dominant_tokens": pruning.visionzip_dominant_tokens if args.pruning == "visionzip" else None,
+                             "visionzip_contextual_tokens": pruning.visionzip_contextual_tokens if args.pruning == "visionzip" else None,
+                             "sparsevlm_stages": pruning.stage_metadata if args.pruning == "sparsevlm" else None,
                              "random_prune_sample_seed": pruning_seed,
                              "preprocess_seconds": preprocess_ended - sample_started,
                              "forward_seconds": forward_ended - forward_started,

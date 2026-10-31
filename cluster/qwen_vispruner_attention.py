@@ -80,3 +80,45 @@ class QwenVisionAttentionCapture:
         window_index, _ = self.visual.get_window_index(self.grid)
         reverse = torch.argsort(window_index.to(patch_scores.device))
         self.scores = patch_scores.reshape(-1, merge).mean(dim=1)[reverse]
+
+
+class QwenVisionZipCapture(QwenVisionAttentionCapture):
+    """Capture VisionZip's received-attention scores and vision keys.
+
+    The official Qwen2.5 image implementation averages the final vision block's
+    attention over heads, sums over queries, and averages the four patch scores
+    and keys feeding each spatially merged language-model token. For video we
+    apply that calculation separately to every attention segment.
+    """
+
+    def __init__(self, model, video_grid_thw: torch.Tensor):
+        super().__init__(model, video_grid_thw)
+        self.keys = None
+
+    def _qkv(self, _module, _args, output):
+        if self.scores is not None:
+            raise RuntimeError("VisionZip attention was captured more than once")
+        if self._position_embeddings is None or self._cu_seqlens is None:
+            raise RuntimeError("Missing Qwen vision attention inputs")
+        length = output.shape[0]
+        q, k, _ = output.reshape(length, 3, self.attn.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        cos, sin = self._position_embeddings
+        cos, sin = cos.unsqueeze(1).float(), sin.unsqueeze(1).float()
+        q = q.float() * cos + _rotate_half(q.float()) * sin
+        k = k.float() * cos + _rotate_half(k.float()) * sin
+        boundaries = self._cu_seqlens.tolist()
+        scores = []
+        scale = q.shape[-1] ** -0.5
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            query = q[start:end].transpose(0, 1)
+            key = k[start:end].transpose(0, 1)
+            attention = (query @ key.transpose(-1, -2) * scale).softmax(dim=-1)
+            scores.append(attention.mean(dim=0).sum(dim=0))
+        patch_scores = torch.cat(scores)
+        merge = self.visual.spatial_merge_unit
+        if patch_scores.numel() % merge:
+            raise ValueError("VisionZip patch scores do not align with spatial merging")
+        window_index, _ = self.visual.get_window_index(self.grid)
+        reverse = torch.argsort(window_index.to(patch_scores.device))
+        self.scores = patch_scores.reshape(-1, merge).mean(dim=1)[reverse]
+        self.keys = k.mean(dim=1).reshape(-1, merge, k.shape[-1]).mean(dim=1)[reverse]

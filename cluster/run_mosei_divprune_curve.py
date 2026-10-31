@@ -37,7 +37,7 @@ def ratio_name(ratio: float) -> str:
 def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
                    ratio: float, protocol: dict, profile_stride: int,
                    method: str = "divprune", random_seed: int | None = None,
-                   important_ratio: float = 0.5) -> bool:
+                   important_ratio: float = 0.5, fastv_k: int = 2) -> bool:
     if not path.is_file():
         return False
     import torch
@@ -47,7 +47,9 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
     payload = torch.load(path, map_location="cpu", weights_only=False)
     saved_ids = [str(value) for value in payload.get("sample_ids", [])]
     config = payload.get("config", {})
-    expected_pruning = f"{method}_projected_video_tokens" if ratio < 1 else "none"
+    expected_pruning = ((f"fastv_after_layer_{fastv_k}_video_tokens" if method == "fastv"
+                         else "sparsevlm_progressive_decoder_video_tokens" if method == "sparsevlm"
+                         else f"{method}_projected_video_tokens") if ratio < 1 else "none")
     return (
         not payload.get("errors") and len(saved_ids) == len(ids)
         and len(set(saved_ids)) == len(ids) and set(saved_ids) == set(ids)
@@ -59,6 +61,16 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and config.get("pruning") == expected_pruning
         and config.get("random_seed") == random_seed
         and (method != "vispruner" or config.get("important_ratio") == important_ratio)
+        and (method != "visionzip" or (
+            config.get("attention_source") == "last_full_qwen_vision_block_received_attention_and_keys"
+            and config.get("merging") == "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
+        ))
+        and (method != "fastv" or config.get("fastv_k") == fastv_k)
+        and (method != "sparsevlm" or (
+            config.get("sparsevlm_stages") == [2, 6, 15]
+            and config.get("sparsevlm_schedule") == "matrix_rank_lambda_geometric_with_final_budget_cap_v1"
+            and config.get("recycling") == "top_30_percent_discarded_then_density_cluster_mean"
+        ))
         and config.get("profile_stride") == profile_stride
         and config.get("video_protocol") == protocol
         and len(payload.get("metadata", [])) == len(ids)
@@ -74,6 +86,10 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
     rows = []
     important_ratio = (json.loads((root / "run_config.json").read_text())["important_ratio"]
                        if method == "vispruner" else None)
+    fastv_k = (json.loads((root / "run_config.json").read_text())["fastv_k"]
+               if method == "fastv" else None)
+    sparsevlm_stages = (json.loads((root / "run_config.json").read_text())["sparsevlm_stages"]
+                        if method == "sparsevlm" else None)
     for name in names:
         folder = root / name
         split_summaries = json.loads((folder / "cost_summary.json").read_text())
@@ -87,6 +103,8 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
             "method": method,
             "extraction_seed": random_seed,
             "important_ratio": important_ratio,
+            "fastv_k": fastv_k,
+            "sparsevlm_stages": sparsevlm_stages,
             "condition": name,
             "requested_retention": int(name[1:]) / 100,
             "actual_retention_train": split_summaries["train"]["weighted_retention"],
@@ -167,7 +185,7 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
 
 
 def main(method: str = "divprune") -> int:
-    if method not in ("divprune", "random", "uniform", "vispruner"):
+    if method not in ("divprune", "random", "uniform", "vispruner", "visionzip", "fastv", "sparsevlm"):
         raise ValueError(f"Unknown token pruning method: {method}")
     parser = argparse.ArgumentParser(description=f"Run a Qwen2.5-VL-7B {method} token-retention curve on MOSEI")
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
@@ -182,6 +200,9 @@ def main(method: str = "divprune") -> int:
     if method == "vispruner":
         parser.add_argument("--important-ratio", type=float, default=0.5,
                             help="Fraction of retained tokens chosen by vision attention")
+    if method == "fastv":
+        parser.add_argument("--fastv-k", type=int, default=2,
+                            help="Number of full decoder layers before FastV pruning")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=1,
                         help="Print extraction progress every N new clips")
@@ -193,6 +214,7 @@ def main(method: str = "divprune") -> int:
     args = parser.parse_args()
     random_seed = args.random_seed if method == "random" else None
     important_ratio = args.important_ratio if method == "vispruner" else 0.5
+    fastv_k = args.fastv_k if method == "fastv" else 2
     if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0 or not args.seeds
             or len(set(args.seeds)) != len(args.seeds)):
         parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
@@ -200,6 +222,8 @@ def main(method: str = "divprune") -> int:
         parser.error("--random-seed must be nonnegative")
     if not 0 <= important_ratio <= 1:
         parser.error("--important-ratio must be in [0, 1]")
+    if fastv_k < 1:
+        parser.error("--fastv-k must be positive")
     try:
         names = [ratio_name(ratio) for ratio in args.ratios]
     except ValueError as exc:
@@ -217,6 +241,13 @@ def main(method: str = "divprune") -> int:
     environment = verify_qwen_environment(curve=True)
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model_info = verify_model(model_dir, "qwen")
+    if method in ("fastv", "sparsevlm"):
+        model_config = json.loads((model_dir / "config.json").read_text())
+        decoder_layers = model_config.get("text_config", model_config)["num_hidden_layers"]
+        if method == "fastv" and fastv_k >= decoder_layers:
+            parser.error(f"--fastv-k must be smaller than the model's {decoder_layers} decoder layers")
+        if method == "sparsevlm" and decoder_layers <= 16:
+            parser.error("SparseVLM stages 2, 6, and 15 require at least 17 decoder layers")
     print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
     data_info = verify_mosei(mosei_root, progress_every=500)
     mosei_root = Path(data_info["root"]).resolve()
@@ -224,6 +255,7 @@ def main(method: str = "divprune") -> int:
         print(json.dumps({"model": model_info, "data": data_info, "protocol": protocol,
                           "method": method, "random_seed": random_seed,
                           "important_ratio": important_ratio if method == "vispruner" else None,
+                          "fastv_k": fastv_k if method == "fastv" else None,
                           "ratios": args.ratios, "seeds": args.seeds,
                           "environment": environment}, indent=2))
         return 0
@@ -238,6 +270,7 @@ def main(method: str = "divprune") -> int:
     print(f"Starting {method} curve on {gpu_name}; "
           f"ratios={args.ratios} mlp_seeds={args.seeds} random_seed={random_seed} "
           f"important_ratio={important_ratio if method == 'vispruner' else None} "
+          f"fastv_k={fastv_k if method == 'fastv' else None} "
           f"test_all={args.test_all}", flush=True)
 
     config = {"model_id": MODEL_ID, "model_dir": str(model_dir),
@@ -255,13 +288,27 @@ def main(method: str = "divprune") -> int:
               "method": {"divprune": "Qwen2.5 DivPrune on projected video tokens",
                          "random": "Qwen2.5 uniform random on projected video tokens",
                          "uniform": "Qwen2.5 temporal-stratified uniform projected video tokens",
-                         "vispruner": "Qwen2.5 VisPruner adapted vision-attention and diversity pruning"}[method],
+                         "vispruner": "Qwen2.5 VisPruner adapted vision-attention and diversity pruning",
+                         "visionzip": "Qwen2.5 VisionZip dominant selection and contextual merging, video adapted",
+                         "fastv": "Qwen2.5 FastV last-query attention after K decoder layers",
+                         "sparsevlm": "Qwen2.5 SparseVLM v1.5-style progressive text-guided pruning with recycling"}[method],
               "test_policy": "Validation curve first; test-all is optional and cannot select a ratio"}
     if method == "random":
         config["random_seed"] = random_seed
     if method == "vispruner":
         config["important_ratio"] = important_ratio
         config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
+    if method == "visionzip":
+        config["attention_source"] = "last_full_qwen_vision_block_received_attention_and_keys"
+        config["merging"] = "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
+    if method == "fastv":
+        config["fastv_k"] = fastv_k
+        config["attention_source"] = "last_prompt_query_after_k_decoder_layers"
+    if method == "sparsevlm":
+        config["sparsevlm_stages"] = [2, 6, 15]
+        config["sparsevlm_schedule"] = "matrix_rank_lambda_geometric_with_final_budget_cap_v1"
+        config["attention_source"] = "selected_post_video_text_queries_at_decoder_stages"
+        config["recycling"] = "top_30_percent_discarded_then_density_cluster_mean"
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
     if config_path.is_file():
@@ -296,7 +343,7 @@ def main(method: str = "divprune") -> int:
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
                 if complete_chunk(chunk, ids[start:end], model_dir, start, ratio,
-                                  protocol, profile_stride, method, random_seed, important_ratio):
+                                  protocol, profile_stride, method, random_seed, important_ratio, fastv_k):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
                 command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
@@ -312,6 +359,12 @@ def main(method: str = "divprune") -> int:
                     command.extend(["--pruning", "uniform"])
                 elif method == "vispruner":
                     command.extend(["--pruning", "vispruner", "--important-ratio", str(important_ratio)])
+                elif method == "visionzip":
+                    command.extend(["--pruning", "visionzip"])
+                elif method == "fastv":
+                    command.extend(["--pruning", "fastv", "--fastv-k", str(fastv_k)])
+                elif method == "sparsevlm":
+                    command.extend(["--pruning", "sparsevlm"])
                 run(command, env)
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
