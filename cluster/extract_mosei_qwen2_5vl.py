@@ -23,6 +23,7 @@ from cluster.qwen_cost import profile_forward_flops  # noqa: E402
 from cluster.qwen_fastv import FastVHook  # noqa: E402
 from cluster.qwen_sparsevlm import SparseVLMHook  # noqa: E402
 from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture, QwenVisionZipCapture  # noqa: E402
+from cluster.mosei_video_decoder import TimedVideoDecoder  # noqa: E402
 from scripts.pruning.random_prune import sample_seed  # noqa: E402
 
 
@@ -68,10 +69,13 @@ def main():
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--log-every", type=int, default=1,
                         help="Print clip progress every N new attempts (default: 1)")
+    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
+                        help="Skip a clip if its Decord worker takes longer than this (default: 60)")
     args = parser.parse_args()
     if (args.start < 0 or args.limit <= 0 or args.save_every <= 0
-            or args.log_every <= 0 or args.profile_stride < 0):
-        parser.error("--start must be nonnegative and --limit/--save-every/--log-every must be positive")
+            or args.log_every <= 0 or args.profile_stride < 0
+            or args.decode_timeout_seconds <= 0):
+        parser.error("--start must be nonnegative and --limit/--save-every/--log-every/--decode-timeout-seconds must be positive")
     if not 0 < args.retain_ratio <= 1:
         parser.error("--retain-ratio must be in (0, 1]")
     if args.random_seed < 0:
@@ -93,7 +97,6 @@ def main():
         f"fastv_k={args.fastv_k if args.pruning == 'fastv' else 'n/a'} "
         f"output={args.output_pt}")
     import torch
-    from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
@@ -161,6 +164,9 @@ def main():
     processor = AutoProcessor.from_pretrained(str(args.model_dir), local_files_only=True)
     log(f"Model and processor ready in {time.perf_counter() - load_started:.1f}s; "
         f"GPU={torch.cuda.get_device_name(model.device)}")
+    decoder = TimedVideoDecoder(args.decode_timeout_seconds)
+    atexit.register(decoder.close)
+    log(f"Decord worker timeout: {args.decode_timeout_seconds:g}s per clip")
     processed = 0
     extraction_started = time.perf_counter()
     for offset, row in enumerate(rows):
@@ -181,10 +187,9 @@ def main():
                 {"type": "text", "text": row["utterance"]},
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            images, videos, video_kwargs = process_vision_info(
-                messages, image_patch_size=14, return_video_kwargs=True,
-                return_video_metadata=True,
-            )
+            log(f"Decoding {sample_id}")
+            images, videos, video_kwargs = decoder.decode(messages, sample_id)
+            log(f"Decoded {sample_id} in {time.perf_counter() - sample_started:.1f}s")
             videos, video_metadata = zip(*videos)
             frame_count = int(videos[0].shape[0])
             frame_height, frame_width = map(int, videos[0].shape[-2:])

@@ -123,10 +123,13 @@ def main() -> int:
                         help="Print extraction progress every N new clips")
     parser.add_argument("--save-every", type=int, default=25,
                         help="Checkpoint embeddings every N new clips")
+    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
+                        help="Skip clips whose Decord decode exceeds this many seconds")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
-    if args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0:
-        parser.error("--chunk-size, --log-every, and --save-every must be positive")
+    if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0
+            or args.decode_timeout_seconds <= 0):
+        parser.error("--chunk-size, --log-every, --save-every, and --decode-timeout-seconds must be positive")
 
     root = args.root.expanduser().resolve()
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
@@ -189,12 +192,14 @@ def main() -> int:
          "--output-dir", str(index_dir)], env)
 
     cost_summaries = {}
+    decode_failures = []
     for split, expected in SPLIT_COUNTS.items():
         profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
         chunks_dir = output_dir / "chunks" / split
         embedding_pt = output_dir / "embeddings" / f"mosei_{split}.pt"
+        split_decode_failures = []
         for start in range(0, expected, args.chunk_size):
             end = min(start + args.chunk_size, expected)
             chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
@@ -217,18 +222,63 @@ def main() -> int:
                         and len(payload.get("metadata", [])) == end - start):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
-                 "--index-csv", str(index), "--output-pt", str(chunk),
-                 "--model-dir", str(model_dir), "--start", str(start),
-                 "--limit", str(end - start), "--profile-stride", str(profile_stride),
-                 "--log-every", str(args.log_every),
-                 "--save-every", str(args.save_every)], env)
+            try:
+                run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
+                     "--index-csv", str(index), "--output-pt", str(chunk),
+                     "--model-dir", str(model_dir), "--start", str(start),
+                     "--limit", str(end - start), "--profile-stride", str(profile_stride),
+                     "--log-every", str(args.log_every),
+                     "--save-every", str(args.save_every),
+                     "--decode-timeout-seconds", str(args.decode_timeout_seconds)], env)
+            except subprocess.CalledProcessError:
+                if not chunk.is_file():
+                    raise
+                payload = torch.load(chunk, map_location="cpu", weights_only=False)
+                chunk_errors = payload.get("errors", [])
+                observed_ids = list(payload.get("sample_ids", [])) + [
+                    error.get("sample_id") for error in chunk_errors
+                ]
+                chunk_config = payload.get("config", {})
+                if (len(observed_ids) != end - start
+                        or len(set(observed_ids)) != end - start
+                        or set(observed_ids) != set(ids[start:end])
+                        or chunk_config.get("model_dir") != str(model_dir)
+                        or chunk_config.get("start") != start
+                        or chunk_config.get("limit") != end - start
+                        or chunk_config.get("video_protocol") != video_protocol
+                        or chunk_config.get("pruning") != "none"
+                        or chunk_config.get("retain_ratio") != 1.0
+                        or not chunk_errors
+                        or any(not str(error.get("error", "")).startswith(
+                            ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+                            for error in chunk_errors)):
+                    raise
+                split_decode_failures.extend(
+                    {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
+                    for error in chunk_errors
+                )
+                print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
+                      "continuing to the next chunk", flush=True)
+        if split_decode_failures:
+            decode_failures.extend(split_decode_failures)
+            print(f"{split}: {len(split_decode_failures)} clips need decoder repair; "
+                  "all other chunks have been extracted", flush=True)
+            continue
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
              "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
              "--pattern", f"{split}_*.pt"], env)
         verify_embeddings(embedding_pt, ids)
         cost_summaries[split] = summarize_embedding_cost(embedding_pt, 1.0, expected)
         (output_dir / "cost_summary.json").write_text(json.dumps(cost_summaries, indent=2) + "\n")
+
+    if decode_failures:
+        failures_path = output_dir / "decode_failures.json"
+        failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
+        raise RuntimeError(
+            f"{len(decode_failures)} clips could not be decoded; all other chunks were saved. "
+            f"See {failures_path}. Repair those clips and rerun to finish merging and training."
+        )
+    (output_dir / "decode_failures.json").unlink(missing_ok=True)
 
     metrics_path = output_dir / "outputs" / "metrics.json"
     if not metrics_complete(metrics_path):

@@ -208,6 +208,8 @@ def main(method: str = "divprune") -> int:
                         help="Print extraction progress every N new clips")
     parser.add_argument("--save-every", type=int, default=25,
                         help="Checkpoint embeddings every N new clips")
+    parser.add_argument("--decode-timeout-seconds", type=float, default=60,
+                        help="Skip clips whose Decord decode exceeds this many seconds")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--test-all", action="store_true",
                         help="After the validation curve is fixed, evaluate every ratio on test")
@@ -215,7 +217,8 @@ def main(method: str = "divprune") -> int:
     random_seed = args.random_seed if method == "random" else None
     important_ratio = args.important_ratio if method == "vispruner" else 0.5
     fastv_k = args.fastv_k if method == "fastv" else 2
-    if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0 or not args.seeds
+    if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0
+            or args.decode_timeout_seconds <= 0 or not args.seeds
             or len(set(args.seeds)) != len(args.seeds)):
         parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
     if random_seed is not None and random_seed < 0:
@@ -352,7 +355,8 @@ def main(method: str = "divprune") -> int:
                      "--limit", str(end - start), "--retain-ratio", str(ratio),
                      "--profile-stride", str(profile_stride),
                      "--log-every", str(args.log_every),
-                     "--save-every", str(args.save_every)]
+                     "--save-every", str(args.save_every),
+                     "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
                 if method == "random":
                     command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
                 elif method == "uniform":
