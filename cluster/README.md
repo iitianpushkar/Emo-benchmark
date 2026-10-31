@@ -333,15 +333,6 @@ before exiting. A forced SIGKILL or node failure leaves the last periodic
 checkpoint. A restart reuses verified complete chunks and resumes incomplete
 chunks from saved sample IDs.
 
-If the launcher reports that `results/qwen2_5_vl_7b_mosei/run_config.json`
-changed, its error lists the exact saved and current values. That file
-describes this experiment; `models/qwen/config.json` describes the model.
-For a different experiment configuration, pass a new `--output-dir` and keep
-the old results. If `code_revision` is the **only** difference, review the
-repository changes, then add `--allow-code-revision-change` to reuse the
-existing chunks. The override is printed in `run.log`; changes to the model,
-dataset, video protocol, GPU environment, or chunk size still block resume.
-
 This prepares train/valid/test indexes, extracts frozen video-and-transcript
 embeddings for all 22,856 clips, checks complete coverage, trains the six-output
 MLP with validation-based checkpoint and threshold selection, and evaluates

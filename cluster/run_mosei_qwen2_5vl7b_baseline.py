@@ -111,24 +111,6 @@ def metrics_complete(path: Path) -> bool:
         return False
 
 
-def config_differences(previous: dict, current: dict, prefix: str = "") -> dict:
-    """Show the exact stored/current fields that prevent a safe resume."""
-    missing = object()
-    differences = {}
-    for key in sorted(previous.keys() | current.keys()):
-        name = f"{prefix}.{key}" if prefix else key
-        old = previous.get(key, missing)
-        new = current.get(key, missing)
-        if isinstance(old, dict) and isinstance(new, dict):
-            differences.update(config_differences(old, new, name))
-        elif old != new:
-            differences[name] = {
-                "previous": "<missing>" if old is missing else old,
-                "current": "<missing>" if new is missing else new,
-            }
-    return differences
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -142,8 +124,6 @@ def main() -> int:
     parser.add_argument("--save-every", type=int, default=25,
                         help="Checkpoint embeddings every N new clips")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
-    parser.add_argument("--allow-code-revision-change", action="store_true",
-                        help="Resume only if code_revision is the sole saved-config difference; records the override in run.log")
     args = parser.parse_args()
     if args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0:
         parser.error("--chunk-size, --log-every, and --save-every must be positive")
@@ -196,21 +176,8 @@ def main() -> int:
     config_path = output_dir / "run_config.json"
     if config_path.is_file():
         previous = json.loads(config_path.read_text())
-        differences = config_differences(previous, config)
-        if differences:
-            if set(differences) == {"code_revision"} and args.allow_code_revision_change:
-                print("WARNING: Resuming with a different Git revision. Review the code changes "
-                      "before using mixed-revision artifacts in a paper. "
-                      f"{json.dumps(differences, sort_keys=True)}", flush=True)
-            else:
-                raise ValueError(
-                    f"Run configuration changed: {config_path}\n"
-                    f"Differences: {json.dumps(differences, indent=2, sort_keys=True)}\n"
-                    + ("If code_revision is the only difference and you have reviewed the "
-                       "change, rerun with --allow-code-revision-change to reuse saved chunks."
-                       if set(differences) == {"code_revision"} else
-                       "Use a new --output-dir for materially different settings; keep existing chunks.")
-                )
+        if previous != config:
+            raise ValueError(f"Run configuration changed; use a new --output-dir or inspect {config_path}")
     else:
         config_path.write_text(json.dumps(config, indent=2) + "\n")
 
