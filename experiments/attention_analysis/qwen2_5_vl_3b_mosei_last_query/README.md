@@ -22,10 +22,12 @@ sequence-by-sequence attention matrices.
 - `spatial_attention_all_layers.png`: time-summed spatial maps for every layer.
 - `layer_overlays/layer_XX.png`: video-frame contact sheets for every layer.
 
-The CSV and NPZ values remain raw probabilities. Overlay colors are normalized
-within each layer so low-mass patterns remain visible; they must not be read as
-cross-layer magnitude comparisons. Attention heatmaps are diagnostic evidence,
-not proof that a token caused the model output.
+The CSV and NPZ values remain raw probabilities. Frame-overlay colors use one
+linear maximum shared by every layer of a clip, and each overlay header reports
+the raw video-attention mass and token-score range. Temporal and spatial summary
+heatmaps are normalized within each layer to reveal their internal pattern.
+Attention heatmaps are diagnostic evidence, not proof that a token caused the
+model output.
 
 Run the Kaggle notebook in
 [`notebooks/qwen2_5_vl_3b_mosei_last_query_attention.ipynb`](notebooks/qwen2_5_vl_3b_mosei_last_query_attention.ipynb).

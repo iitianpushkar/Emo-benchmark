@@ -258,31 +258,42 @@ def overlay_contact_sheets(output: Path, frames: np.ndarray, visual: np.ndarray,
     temporal = visual.shape[1]
     columns = min(8, temporal)
     cell = 224
+    header_height = 34
     label_height = 24
     rows = math.ceil(temporal / columns)
+    global_scale = max(float(visual.max()), 1e-30)
     for layer in range(visual.shape[0]):
         layer_scores = visual[layer]
-        scale = max(float(layer_scores.max()), 1e-30)
-        canvas = np.full((rows * (cell + label_height), columns * cell, 3), 245, dtype=np.uint8)
+        canvas = np.full(
+            (header_height + rows * (cell + label_height), columns * cell, 3),
+            245, dtype=np.uint8,
+        )
+        title = (
+            f"Layer {layer:02d} | raw video mass={layer_scores.sum():.6f} | "
+            f"token max={layer_scores.max():.3e} | shared max={global_scale:.3e}"
+        )
+        cv2.putText(canvas, title, (8, 23), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (25, 25, 25), 1, cv2.LINE_AA)
         for group in range(temporal):
             frame_index = min(group * temporal_patch, len(frames) - 1)
             frame = cv2.resize(frames[frame_index], (cell, cell), interpolation=cv2.INTER_AREA)
             heat = cv2.resize(
-                (layer_scores[group] / scale).astype(np.float32),
+                (layer_scores[group] / global_scale).astype(np.float32),
                 (cell, cell), interpolation=cv2.INTER_CUBIC,
             )
             color = cv2.cvtColor(
                 cv2.applyColorMap(np.uint8(np.clip(heat, 0, 1) * 255), cv2.COLORMAP_INFERNO),
                 cv2.COLOR_BGR2RGB,
             )
-            alpha = (0.12 + 0.58 * np.clip(heat, 0, 1))[..., None]
+            alpha = (0.70 * np.clip(heat, 0, 1))[..., None]
             blended = np.uint8(np.clip(frame * (1 - alpha) + color * alpha, 0, 255))
             row, column = divmod(group, columns)
-            y0, x0 = row * (cell + label_height), column * cell
+            y0, x0 = header_height + row * (cell + label_height), column * cell
             canvas[y0:y0 + cell, x0:x0 + cell] = blended
-            cv2.putText(canvas, f"t={group} frame={frame_index}",
+            group_mass = float(layer_scores[group].sum())
+            cv2.putText(canvas, f"t={group} frame={frame_index} mass={group_mass:.2e}",
                         (x0 + 5, y0 + cell + 17), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.42, (30, 30, 30), 1, cv2.LINE_AA)
+                        0.36, (30, 30, 30), 1, cv2.LINE_AA)
         bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
         cv2.imwrite(str(overlay_dir / f"layer_{layer:02d}.png"), bgr)
 
@@ -387,7 +398,8 @@ def analyze_sample(args, row, model, processor) -> dict:
         "prompt_style": "utterance_only",
         "attention_note": (
             "Raw CSV/NPZ values are true head-mean attention probabilities. "
-            "Overlay colors are independently normalized within each layer for visibility."
+            "Frame-overlay colors use one linear maximum shared by every layer of this clip. "
+            "Temporal and spatial summary heatmaps are normalized within each layer."
         ),
     }
     (sample_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
