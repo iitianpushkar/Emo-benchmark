@@ -12,6 +12,7 @@ if __package__ in (None, ""):
 import argparse
 import csv
 import gc
+import hashlib
 import json
 import math
 import os
@@ -72,6 +73,42 @@ def parse_args() -> argparse.Namespace:
 
 def safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "sample"
+
+
+def completed_sample(sample_dir: Path, args, sample_id: str) -> bool:
+    """Return true only when a prior clip has every expected, matching output."""
+    try:
+        metadata = json.loads((sample_dir / "metadata.json").read_text())
+        expected = {
+            "sample_id": sample_id,
+            "model_id": args.model_id,
+            "analyzer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "fps": args.fps,
+            "min_frames": args.min_frames,
+            "max_frames": args.max_frames,
+            "frame_size": args.frame_size,
+            "head_reduction": "arithmetic mean over all language-decoder attention heads",
+        }
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            return False
+        required = (
+            "attention_arrays.npz", "layer_summary.csv", "visual_token_attention.csv",
+            "modality_attention_by_layer.png", "temporal_attention_by_layer.png",
+            "spatial_attention_all_layers.png",
+        )
+        if any(not (sample_dir / name).is_file() for name in required):
+            return False
+        with np.load(sample_dir / "attention_arrays.npz") as arrays:
+            mean_attention = arrays["mean_attention"]
+            video_attention = arrays["video_attention"]
+        layers = int(metadata["attention_layers"])
+        sequence = int(metadata["sequence_tokens"])
+        if mean_attention.shape != (layers, sequence) or video_attention.shape[0] != layers:
+            return False
+        overlays = list((sample_dir / "layer_overlays").glob("layer_*.png"))
+        return len(overlays) == layers
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def load_rows(path: Path, requested: list[str], count: int) -> list[dict[str, str]]:
@@ -256,7 +293,7 @@ def analyze_sample(args, row, model, processor) -> dict:
 
     sample_id = row["sample_id"]
     sample_dir = args.output_dir / safe_name(sample_id)
-    if args.skip_existing and (sample_dir / "metadata.json").is_file():
+    if args.skip_existing and completed_sample(sample_dir, args, sample_id):
         print(f"Skipping completed sample {sample_id}", flush=True)
         return json.loads((sample_dir / "metadata.json").read_text())
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +365,9 @@ def analyze_sample(args, row, model, processor) -> dict:
         "utterance": row["utterance"],
         "emotion_scores": {name: float(row[name]) for name in EMOTIONS if row.get(name, "") != ""},
         "model_id": args.model_id,
+        "model_revision": getattr(model.config, "_commit_hash", None),
+        "analyzer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "torch_version": torch.__version__,
         "query_position": sequence_length - 1,
         "query_token_id": final_token_id,
         "query_token": processor.tokenizer.convert_ids_to_tokens(final_token_id),
