@@ -19,6 +19,8 @@ Browse by research question. Each run keeps its notebooks, configuration, and av
 |---|---|
 | [qwen2_5_vl_3b_meld](information_horizon/qwen2_5_vl_3b_meld/README.md) | notebook (first 2 dev samples, all visual tokens and depths; results not yet run) |
 | [qwen2_5_vl_3b_shared](baselines/qwen2_5_vl_3b_shared/README.md) | chunks, embeddings, outputs, results |
+| [qwen2_5_vl_3b_lm_head_first_token](baselines/qwen2_5_vl_3b_lm_head_first_token/README.md) | Kaggle notebook for zero-shot first-token LM-head scoring on the saved MELD test embeddings |
+| [qwen2_5_vl_3b_lm_head_code](baselines/qwen2_5_vl_3b_lm_head_code/README.md) | Resumable Kaggle notebook for A-G code-prompt extraction and zero-shot LM-head scoring on MELD test |
 | [qwen2_5_vl_3b_visual_only](baselines/qwen2_5_vl_3b_visual_only/README.md) | config.yaml |
 | [tdv_dino_ibot](baselines/tdv_dino_ibot/README.md) | notebooks |
 | [mosei_tfidf_text](baselines/mosei_tfidf_text/README.md) | full-data six-emotion transcript baseline, metrics, predictions |

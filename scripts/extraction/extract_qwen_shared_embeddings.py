@@ -151,9 +151,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--prompt-style",
-        choices=["emotion_task", "utterance_only"],
+        choices=["emotion_task", "emotion_code", "utterance_only"],
         default="emotion_task",
-        help="Text prompt used with each video. emotion_task includes the seven candidate emotions.",
+        help=(
+            "Text prompt used with each video. emotion_task lists the seven emotions; "
+            "emotion_code maps them to single-character A-G verbalizers."
+        ),
     )
     parser.add_argument(
         "--no-generation-prompt",
@@ -233,6 +236,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def make_prompt(utterance: str | None, prompt_style: str, modality_mode: str) -> str:
+    code_options = (
+        "Choose exactly one code:\n"
+        "A = anger\n"
+        "B = disgust\n"
+        "C = fear\n"
+        "D = joy\n"
+        "E = neutral\n"
+        "F = sadness\n"
+        "G = surprise\n"
+    )
     if modality_mode == "video_only":
         if prompt_style == "utterance_only":
             return "Infer the speaker's emotion from the video."
@@ -241,6 +254,12 @@ def make_prompt(utterance: str | None, prompt_style: str, modality_mode: str) ->
                 "Task: infer the speaker's emotion from the video as exactly one of:\n"
                 "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
                 "Focus on facial expression, body cues, and scene context."
+            )
+        if prompt_style == "emotion_code":
+            return (
+                "Task: classify the speaker's emotion from the video.\n"
+                f"{code_options}"
+                "Answer with only one code:"
             )
         raise ValueError(f"Unknown prompt style: {prompt_style}")
 
@@ -255,6 +274,13 @@ def make_prompt(utterance: str | None, prompt_style: str, modality_mode: str) ->
                 f"Utterance: {utterance}\n"
                 "Focus on wording and conversational meaning."
             )
+        if prompt_style == "emotion_code":
+            return (
+                "Task: classify the speaker's emotion from the utterance.\n"
+                f"{code_options}"
+                f"Utterance: {utterance}\n"
+                "Answer with only one code:"
+            )
         raise ValueError(f"Unknown prompt style: {prompt_style}")
 
     if prompt_style == "utterance_only":
@@ -265,6 +291,13 @@ def make_prompt(utterance: str | None, prompt_style: str, modality_mode: str) ->
             "Emotion choices: anger, disgust, fear, joy, neutral, sadness, surprise.\n"
             f"Utterance: {utterance}\n"
             "Focus on facial expression, body cues, scene context, and wording."
+        )
+    if prompt_style == "emotion_code":
+        return (
+            "Task: classify the speaker's emotion from the video and utterance.\n"
+            f"{code_options}"
+            f"Utterance: {utterance}\n"
+            "Answer with only one code:"
         )
     raise ValueError(f"Unknown prompt style: {prompt_style}")
 

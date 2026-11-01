@@ -5,6 +5,8 @@ Full-token Qwen baselines and alternative visual/VLM encoder comparisons.
 [All experiments](../README.md)
 
 - [qwen2_5_vl_3b_shared](qwen2_5_vl_3b_shared/README.md): Full video + utterance Qwen baseline. Contains the trained MLP, per-class predictions, embeddings, extraction chunks, and curated figures.
+- [qwen2_5_vl_3b_lm_head_first_token](qwen2_5_vl_3b_lm_head_first_token/README.md): Zero-shot first-token emotion classification using the frozen Qwen LM head and existing MELD test embeddings.
+- [qwen2_5_vl_3b_lm_head_code](qwen2_5_vl_3b_lm_head_code/README.md): Zero-shot A-G code-verbalizer classification with test embeddings re-extracted under a single-token response prompt.
 - [qwen2_5_vl_3b_visual_only](qwen2_5_vl_3b_visual_only/README.md): Configuration for the original visual-feature baseline; local results are not bundled here.
 - [tdv_dino_ibot](tdv_dino_ibot/README.md): Standalone Kaggle notebook comparing DINO, iBOT, and TDV encoder backbones.
 - [mosei_tfidf_text](mosei_tfidf_text/README.md): Full-data CMU-MOSEI six-label transcript baseline.
