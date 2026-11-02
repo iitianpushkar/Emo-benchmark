@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cluster.run_mosei_qwen2_5vl7b_baseline import (
-    complete_baseline_chunk, order_chunk_work,
+    complete_baseline_chunk, order_chunk_work, selected_splits,
+    verified_decode_errors,
 )
 
 
@@ -24,6 +25,10 @@ class BaselineResumeOrderTests(unittest.TestCase):
         chunks = [{"state": "new", "mtime": 0, "ordinal": i} for i in range(3)]
         self.assertEqual(order_chunk_work(chunks), chunks)
 
+    def test_test_only_extraction_never_selects_train_or_validation(self):
+        self.assertEqual(selected_splits("test"), ("test",))
+        self.assertEqual(selected_splits(None), ("train", "valid", "test"))
+
     def test_successful_saved_chunk_is_reused(self):
         protocol = {"fps": 6}
         payload = {
@@ -40,6 +45,14 @@ class BaselineResumeOrderTests(unittest.TestCase):
         payload["sample_ids"] = ["a"]
         self.assertFalse(complete_baseline_chunk(payload, ["a", "b"],
                                                  Path("/models/qwen"), 0, protocol, 128))
+        payload["embeddings"] = SimpleNamespace(shape=(1, 3584))
+        payload["metadata"] = [{}]
+        self.assertEqual(verified_decode_errors(payload, ["a", "b"], Path("/models/qwen"),
+                                                0, protocol, 128), payload["errors"])
+        payload["errors"][0]["error"] = "RuntimeError: CUDA out of memory"
+        with self.assertRaises(ValueError):
+            verified_decode_errors(payload, ["a", "b"], Path("/models/qwen"),
+                                   0, protocol, 128)
 
 
 if __name__ == "__main__":

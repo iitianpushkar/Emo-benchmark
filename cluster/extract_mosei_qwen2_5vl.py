@@ -71,6 +71,8 @@ def main():
                         help="Print clip progress every N new attempts (default: 1)")
     parser.add_argument("--decode-timeout-seconds", type=float, default=10,
                         help="Skip a clip if its Decord worker takes longer than this (default: 10)")
+    parser.add_argument("--defer-saved-errors", action="store_true",
+                        help="On resume, skip saved decode failures and visit never-attempted clips")
     args = parser.parse_args()
     if (args.start < 0 or args.limit <= 0 or args.save_every <= 0
             or args.log_every <= 0 or args.profile_stride < 0
@@ -134,14 +136,24 @@ def main():
         embeddings = list(payload["embeddings"].unbind())
         ids = [str(value) for value in payload["sample_ids"]]
         metadata = list(payload.get("metadata", []))
+        if args.defer_saved_errors:
+            errors = list(payload.get("errors", []))
         if len(embeddings) != len(ids) or len(metadata) != len(ids):
             raise ValueError(f"Malformed existing chunk: {args.output_pt}")
         expected_ids = {row["sample_id"] for row in rows}
         if len(set(ids)) != len(ids) or not set(ids) <= expected_ids:
             raise ValueError(f"Existing chunk has unexpected or repeated IDs: {args.output_pt}")
+        error_ids = [error.get("sample_id") for error in errors]
+        if (len(set(error_ids)) != len(error_ids) or not set(error_ids) <= expected_ids
+                or set(error_ids) & set(ids)
+                or any(not str(error.get("error", "")).startswith(
+                    ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+                    for error in errors)):
+            raise ValueError(f"Existing chunk has invalid saved errors: {args.output_pt}")
         log(f"Resuming {args.output_pt}: {len(ids)} embeddings already saved")
 
     done = set(ids)
+    deferred = {error["sample_id"] for error in errors}
     saved_state = [len(ids), len(errors)]
 
     def checkpoint_on_exit() -> None:
@@ -172,7 +184,7 @@ def main():
     extraction_started = time.perf_counter()
     for offset, row in enumerate(rows):
         sample_id = row["sample_id"]
-        if sample_id in done:
+        if sample_id in done or sample_id in deferred:
             continue
         pruning_seed = sample_seed(args.random_seed, sample_id) if args.pruning == "random" else None
         try:

@@ -344,6 +344,18 @@ chunks from saved sample IDs. The baseline processes the newest partial
 checkpoint first, then untouched chunks, then chunks that were fully attempted
 but still have decoder failures. This lets an interrupted test chunk continue
 before retrying older train decode failures.
+To continue only the interrupted test extraction without revisiting train or
+validation, run the baseline launcher with `--extract-split test` and the same
+`--chunk-size`. This mode saves and verifies test chunks and skips classifier
+training. Previously recorded decoder failures are deferred, allowing clips
+that have never been attempted to finish first. If failures remain, it writes
+`decode_failures_test.json` and keeps all successful test embeddings. A later
+full run can retry those failures and compute complete-coverage metrics.
+
+```bash
+~/hf-env/bin/python -u cluster/run_mosei_qwen2_5vl7b_baseline.py \
+  --root ../.. --chunk-size 500 --extract-split test
+```
 All cluster experiment launchers gate a resume on `--chunk-size` only. They
 print other changed run settings and append those configurations to
 `resume_configs.json`; saved chunks still undergo their own sample-ID and

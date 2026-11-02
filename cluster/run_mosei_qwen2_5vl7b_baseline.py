@@ -140,6 +140,37 @@ def order_chunk_work(chunks: list[dict]) -> list[dict]:
     ))
 
 
+def selected_splits(extract_split: str | None) -> tuple[str, ...]:
+    """Limit an extraction-only job to its requested split."""
+    return (extract_split,) if extract_split else tuple(SPLIT_COUNTS)
+
+
+def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Path,
+                           start: int, protocol: dict, profile_stride: int) -> list[dict]:
+    """Accept an otherwise complete chunk with only video decoder failures."""
+    errors = payload.get("errors", [])
+    saved_ids = payload.get("sample_ids", [])
+    observed_ids = list(saved_ids) + [error.get("sample_id") for error in errors]
+    config = payload.get("config", {})
+    if (not errors or len(observed_ids) != len(expected_ids)
+            or len(set(observed_ids)) != len(expected_ids)
+            or set(observed_ids) != set(expected_ids)
+            or tuple(payload["embeddings"].shape) != (len(saved_ids), HIDDEN_SIZE)
+            or len(payload.get("metadata", [])) != len(saved_ids)
+            or config.get("model_dir") != str(model_dir)
+            or config.get("start") != start
+            or config.get("limit") != len(expected_ids)
+            or config.get("video_protocol") != protocol
+            or config.get("pruning") != "none"
+            or config.get("retain_ratio") != 1.0
+            or config.get("profile_stride") != profile_stride
+            or any(not str(error.get("error", "")).startswith(
+                ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+                for error in errors)):
+        raise ValueError("Chunk is not fully attempted with decoder-only failures")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -154,6 +185,8 @@ def main() -> int:
                         help="Checkpoint embeddings every N new clips")
     parser.add_argument("--decode-timeout-seconds", type=float, default=10,
                         help="Skip clips whose Decord decode exceeds this many seconds")
+    parser.add_argument("--extract-split", choices=tuple(SPLIT_COUNTS),
+                        help="Extract only this split; skip classifier training and other splits")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
     if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0
@@ -219,7 +252,8 @@ def main() -> int:
 
     split_inputs = {}
     work = []
-    for split, expected in SPLIT_COUNTS.items():
+    for split in selected_splits(args.extract_split):
+        expected = SPLIT_COUNTS[split]
         profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
@@ -251,37 +285,33 @@ def main() -> int:
     for item in ordered_work:
         split, index, chunk = item["split"], item["index"], item["chunk"]
         start, end, profile_stride = item["start"], item["end"], item["profile_stride"]
+        if args.extract_split and item["state"] == "retry_errors":
+            payload = torch.load(chunk, map_location="cpu", weights_only=False)
+            chunk_errors = verified_decode_errors(
+                payload, item["ids"], model_dir, start, video_protocol, profile_stride)
+            decode_failures.extend(
+                {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
+                for error in chunk_errors
+            )
+            print(f"Deferring {len(chunk_errors)} saved decoder failures in {chunk}", flush=True)
+            continue
         try:
-            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
+            command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
                  "--index-csv", str(index), "--output-pt", str(chunk),
                  "--model-dir", str(model_dir), "--start", str(start),
                  "--limit", str(end - start), "--profile-stride", str(profile_stride),
                  "--log-every", str(args.log_every),
                  "--save-every", str(args.save_every),
-                 "--decode-timeout-seconds", str(args.decode_timeout_seconds)], env)
+                 "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
+            if args.extract_split:
+                command.append("--defer-saved-errors")
+            run(command, env)
         except subprocess.CalledProcessError:
             if not chunk.is_file():
                 raise
             payload = torch.load(chunk, map_location="cpu", weights_only=False)
-            chunk_errors = payload.get("errors", [])
-            observed_ids = list(payload.get("sample_ids", [])) + [
-                error.get("sample_id") for error in chunk_errors
-            ]
-            chunk_config = payload.get("config", {})
-            if (len(observed_ids) != end - start
-                    or len(set(observed_ids)) != end - start
-                    or set(observed_ids) != set(item["ids"])
-                    or chunk_config.get("model_dir") != str(model_dir)
-                    or chunk_config.get("start") != start
-                    or chunk_config.get("limit") != end - start
-                    or chunk_config.get("video_protocol") != video_protocol
-                    or chunk_config.get("pruning") != "none"
-                    or chunk_config.get("retain_ratio") != 1.0
-                    or not chunk_errors
-                    or any(not str(error.get("error", "")).startswith(
-                        ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
-                        for error in chunk_errors)):
-                raise
+            chunk_errors = verified_decode_errors(
+                payload, item["ids"], model_dir, start, video_protocol, profile_stride)
             decode_failures.extend(
                 {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
                 for error in chunk_errors
@@ -289,7 +319,9 @@ def main() -> int:
             print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
                   "continuing to the next chunk", flush=True)
 
-    cost_summaries = {}
+    cost_path = output_dir / "cost_summary.json"
+    cost_summaries = (json.loads(cost_path.read_text())
+                      if args.extract_split and cost_path.is_file() else {})
     failed_splits = {error["split"] for error in decode_failures}
     for split, info in split_inputs.items():
         if split in failed_splits:
@@ -301,16 +333,20 @@ def main() -> int:
         verify_embeddings(info["embedding_pt"], info["ids"])
         cost_summaries[split] = summarize_embedding_cost(
             info["embedding_pt"], 1.0, info["expected"])
-        (output_dir / "cost_summary.json").write_text(json.dumps(cost_summaries, indent=2) + "\n")
+        cost_path.write_text(json.dumps(cost_summaries, indent=2) + "\n")
 
+    failures_name = f"decode_failures_{args.extract_split}.json" if args.extract_split else "decode_failures.json"
+    failures_path = output_dir / failures_name
     if decode_failures:
-        failures_path = output_dir / "decode_failures.json"
         failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
         raise RuntimeError(
             f"{len(decode_failures)} clips could not be decoded; all other chunks were saved. "
             f"See {failures_path}. Repair those clips and rerun to finish merging and training."
         )
-    (output_dir / "decode_failures.json").unlink(missing_ok=True)
+    failures_path.unlink(missing_ok=True)
+    if args.extract_split:
+        print(f"{args.extract_split} extraction complete; other splits and classifier were skipped", flush=True)
+        return 0
 
     metrics_path = output_dir / "outputs" / "metrics.json"
     if not metrics_complete(metrics_path):
