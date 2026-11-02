@@ -111,6 +111,24 @@ def metrics_complete(path: Path) -> bool:
         return False
 
 
+def config_differences(previous: dict, current: dict) -> dict:
+    """Show exactly why a saved run cannot be resumed as the same experiment."""
+    differences = {}
+    missing = "<missing>"
+
+    def compare(old: dict, new: dict, prefix: str = "") -> None:
+        for key in sorted(old.keys() | new.keys()):
+            path = f"{prefix}.{key}" if prefix else key
+            before, after = old.get(key, missing), new.get(key, missing)
+            if isinstance(before, dict) and isinstance(after, dict):
+                compare(before, after, path)
+            elif before != after:
+                differences[path] = {"previous": before, "current": after}
+
+    compare(previous, current)
+    return differences
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -180,7 +198,13 @@ def main() -> int:
     if config_path.is_file():
         previous = json.loads(config_path.read_text())
         if previous != config:
-            raise ValueError(f"Run configuration changed; use a new --output-dir or inspect {config_path}")
+            differences = config_differences(previous, config)
+            raise ValueError(
+                f"Run configuration changed: {config_path}\n"
+                f"Differences: {json.dumps(differences, indent=2, sort_keys=True)}\n"
+                "Keep the saved results. Resume with the original settings, or use a "
+                "new --output-dir for a different experiment."
+            )
     else:
         config_path.write_text(json.dumps(config, indent=2) + "\n")
 
