@@ -21,8 +21,10 @@ with seven-class MELD macro F1.
   encoder still runs on every input frame, so this experiment measures decoder
   token reduction rather than vision-encoder reduction.
 - Train/validation/test split indexes and targets come from `prepare_mosei.py`.
-  Every ratio must have complete, aligned sample IDs; extraction failures stop
-  the curve. Per-clip visual and total sequence-token counts, synchronized
+  Saved decoder failures are skipped on restart, and the curve continues on
+  successfully decoded clips. Each ratio records indexed, embedded, and missing
+  clip counts. Compare methods on aligned sample IDs before making paper-level
+  claims. Per-clip visual and total sequence-token counts, synchronized
   preprocessing/forward/end-to-end latency, and peak PyTorch GPU allocation
   are recorded for each split. Every ratio profiles the same roughly 128
   evenly spaced clips per split with a separate forward. PyTorch's
@@ -64,9 +66,10 @@ The resumable outputs go to `../../results/qwen2_5_vl_7b_mosei_divprune_curve/`.
 The launcher records model and data hashes, Git revision, requested ratios,
 actual token counts, synchronized latency, process GPU allocation, theoretical
 forward TFLOPs, chunk metadata, MLP checkpoints and predictions,
-`cost_summary.json` for each ratio, and
-`validation_curve.csv`, `.json`, and `.png`. It requires the same configuration
-when resuming; use a new `--output-dir` after changing code or inputs. A shorter
+`cost_summary.json` and `coverage.json` for each ratio, and
+`validation_curve.csv`, `.json`, and `.png`. The run-level resume gate checks
+`--chunk-size`; saved chunks still validate their extraction settings and clip
+IDs. Use a new `--output-dir` after changing the experiment protocol. A shorter
 smoke sweep can be selected explicitly with `--ratios 1 .3 .05`, but it is a
 different protocol and must use a different output directory.
 

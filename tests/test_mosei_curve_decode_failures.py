@@ -1,10 +1,14 @@
 """A failed MOSEI chunk may be skipped only after every clip was attempted."""
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from cluster.run_mosei_divprune_curve import decode_failure_records
+from cluster.run_mosei_divprune_curve import (
+    decode_failure_records, test_metrics_match, training_metrics_match,
+)
 
 
 class DecodeFailureRecordsTest(unittest.TestCase):
@@ -47,6 +51,39 @@ class DecodeFailureRecordsTest(unittest.TestCase):
         self.payload["config"]["retain_ratio"] = 0.5
         with self.assertRaises(ValueError):
             self.records()
+
+    def test_partial_training_and_test_metrics_are_accepted_only_at_matching_coverage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            mlp = root / "mlp"
+            mlp.mkdir()
+            (mlp / "best_mlp.pt").touch()
+            (mlp / "validation_predictions.csv").touch()
+            train_coverage = {"train": {"indexed": 3, "embedded": 2, "missing": 1},
+                              "valid": {"indexed": 2, "embedded": 1, "missing": 1}}
+            training_report = {
+                "coverage": {"train": dict(train_coverage["train"]),
+                             "validation": dict(train_coverage["valid"])},
+                "validation": {"sample_count": 1},
+            }
+            training_path = mlp / "metrics.json"
+            training_path.write_text(json.dumps(training_report))
+            self.assertTrue(training_metrics_match(training_path, train_coverage))
+
+            evaluation = root / "test"
+            evaluation.mkdir()
+            (evaluation / "predictions.csv").touch()
+            test_coverage = {"indexed": 2, "embedded": 1, "missing": 1}
+            test_path = evaluation / "metrics.json"
+            test_path.write_text(json.dumps({"coverage": test_coverage,
+                                             "metrics": {"sample_count": 1}}))
+            self.assertTrue(test_metrics_match(test_path, test_coverage))
+
+            training_report["coverage"]["validation"]["embedded"] = 2
+            training_path.write_text(json.dumps(training_report))
+            self.assertFalse(training_metrics_match(training_path, train_coverage))
+            self.assertFalse(test_metrics_match(test_path, {"indexed": 2, "embedded": 2,
+                                                        "missing": 0}))
 
 
 if __name__ == "__main__":

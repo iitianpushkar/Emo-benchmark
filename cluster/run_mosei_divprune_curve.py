@@ -10,6 +10,7 @@ import os
 import statistics
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,8 +22,8 @@ from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # n
 from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
-    HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
-    verify_available_embeddings as verify_embeddings,
+    HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, order_chunk_work,
+    run, sha256, verify_available_embeddings,
 )
 
 DEFAULT_RATIOS = (1.0, .9, .8, .7, .6, .5, .4, .3, .25, .2, .15, .1, .05)
@@ -129,6 +130,33 @@ def decode_failure_records(payload: dict, expected_ids: list[str], model_dir: Pa
     return errors
 
 
+def training_metrics_match(path: Path, coverage: dict[str, dict[str, int]]) -> bool:
+    if (not path.is_file() or not (path.parent / "best_mlp.pt").is_file()
+            or not (path.parent / "validation_predictions.csv").is_file()):
+        return False
+    try:
+        report = json.loads(path.read_text())
+        for split, report_split in (("train", "train"), ("valid", "validation")):
+            if any(report["coverage"][report_split][key] != coverage[split][key]
+                   for key in ("indexed", "embedded", "missing")):
+                return False
+        return report["validation"]["sample_count"] == coverage["valid"]["embedded"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def test_metrics_match(path: Path, coverage: dict[str, int]) -> bool:
+    if not path.is_file() or not (path.parent / "predictions.csv").is_file():
+        return False
+    try:
+        report = json.loads(path.read_text())
+        return (all(report["coverage"][key] == coverage[key]
+                    for key in ("indexed", "embedded", "missing"))
+                and report["metrics"]["sample_count"] == coverage["embedded"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
                 method: str = "divprune", random_seed: int | None = None) -> None:
     rows = []
@@ -141,6 +169,7 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
     for name in names:
         folder = root / name
         split_summaries = json.loads((folder / "cost_summary.json").read_text())
+        coverage = json.loads((folder / "coverage.json").read_text())
         reports = [json.loads((folder / "mlp" / f"seed_{seed}" / "metrics.json").read_text())
                    for seed in seeds]
         checkpoint_f1 = [float(report["checkpoint_macro_f1_at_0.5"]) for report in reports]
@@ -155,6 +184,14 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
             "sparsevlm_stages": sparsevlm_stages,
             "condition": name,
             "requested_retention": int(name[1:]) / 100,
+            "train_indexed": coverage["train"]["indexed"],
+            "train_embedded": coverage["train"]["embedded"],
+            "train_missing": coverage["train"]["missing"],
+            "valid_indexed": coverage["valid"]["indexed"],
+            "valid_embedded": coverage["valid"]["embedded"],
+            "valid_missing": coverage["valid"]["missing"],
+            "validation_coverage_complete": all(coverage[split]["missing"] == 0
+                                                for split in ("train", "valid")),
             "actual_retention_train": split_summaries["train"]["weighted_retention"],
             "actual_retention_valid": split_summaries["valid"]["weighted_retention"],
             "mean_full_visual_tokens_valid": split_summaries["valid"]["mean_full_visual_tokens_per_clip"],
@@ -178,6 +215,9 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
         }
         test_reports = [folder / "test_eval" / f"seed_{seed}" / "metrics.json" for seed in seeds]
         if all(path.is_file() for path in test_reports):
+            row["test_indexed"] = coverage["test"]["indexed"]
+            row["test_embedded"] = coverage["test"]["embedded"]
+            row["test_missing"] = coverage["test"]["missing"]
             test_metrics = [json.loads(path.read_text())["metrics"] for path in test_reports]
             values = [float(metric["macro_f1"]) for metric in test_metrics]
             row["test_macro_f1_mean"] = statistics.mean(values)
@@ -374,22 +414,20 @@ def main(method: str = "divprune") -> int:
          "--mosei-root", str(mosei_root), "--output-dir", str(index_dir)], env)
     splits = ("train", "valid", "test") if args.test_all else ("train", "valid")
     decode_failures = []
-
+    split_inputs = {}
+    work = []
     for ratio, name in zip(args.ratios, names):
-        print(f"[{name}] Starting retention ratio {ratio:.0%}", flush=True)
         folder = output_dir / name
-        retention_path = folder / "cost_summary.json"
-        retention = json.loads(retention_path.read_text()) if retention_path.is_file() else {}
-        ratio_has_decode_failures = False
+        split_inputs[name] = {}
         for split in splits:
-            print(f"[{name}] Starting {split} split ({SPLIT_COUNTS[split]} clips)", flush=True)
             expected = SPLIT_COUNTS[split]
             profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
             index = index_dir / f"mosei_{split}_index.csv"
             ids = index_ids(index, expected)
             chunks_dir = folder / "chunks" / split
             embedding_pt = folder / "embeddings" / f"mosei_{split}.pt"
-            split_decode_failures = []
+            split_inputs[name][split] = {"index": index, "ids": ids,
+                                          "chunks_dir": chunks_dir, "embedding_pt": embedding_pt}
             for start in range(0, expected, args.chunk_size):
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
@@ -397,97 +435,144 @@ def main(method: str = "divprune") -> int:
                                   protocol, profile_stride, method, random_seed, important_ratio, fastv_k):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-                command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
-                     "--index-csv", str(index), "--output-pt", str(chunk),
-                     "--model-dir", str(model_dir), "--start", str(start),
-                     "--limit", str(end - start), "--retain-ratio", str(ratio),
-                     "--profile-stride", str(profile_stride),
-                     "--log-every", str(args.log_every),
-                     "--save-every", str(args.save_every),
-                     "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
-                if method == "random":
-                    command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
-                elif method == "uniform":
-                    command.extend(["--pruning", "uniform"])
-                elif method == "vispruner":
-                    command.extend(["--pruning", "vispruner", "--important-ratio", str(important_ratio)])
-                elif method == "visionzip":
-                    command.extend(["--pruning", "visionzip"])
-                elif method == "fastv":
-                    command.extend(["--pruning", "fastv", "--fastv-k", str(fastv_k)])
-                elif method == "sparsevlm":
-                    command.extend(["--pruning", "sparsevlm"])
-                try:
-                    run(command, env)
-                except subprocess.CalledProcessError:
-                    if not chunk.is_file():
-                        raise
-                    import torch
-
+                state, mtime = "new", 0.0
+                if chunk.is_file():
                     payload = torch.load(chunk, map_location="cpu", weights_only=False)
-                    chunk_errors = decode_failure_records(
-                        payload, ids[start:end], model_dir, start, ratio, protocol,
-                        profile_stride, method, random_seed, important_ratio, fastv_k,
-                    )
-                    split_decode_failures.extend(
-                        {"condition": name, "split": split,
-                         "sample_id": error["sample_id"], "error": error["error"]}
-                        for error in chunk_errors
-                    )
-                    print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
-                          "continuing to the next chunk", flush=True)
-            if split_decode_failures:
-                decode_failures.extend(split_decode_failures)
-                ratio_has_decode_failures = True
-                print(f"[{name}] {split}: {len(split_decode_failures)} clips need "
-                      "decoder repair; other chunks were saved", flush=True)
-                continue
-            run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
-                 "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
-                 "--pattern", f"{split}_*.pt"], env)
-            verify_embeddings(embedding_pt, ids)
-            retention[split] = summarize_embedding_cost(embedding_pt, ratio, expected)
-        if ratio_has_decode_failures:
-            print(f"[{name}] Skipping matched MLP until decoder failures are repaired", flush=True)
+                    attempted = len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
+                    state = "partial" if attempted < end - start else "retry_errors"
+                    mtime = chunk.stat().st_mtime
+                work.append({"name": name, "ratio": ratio, "split": split,
+                             "index": index, "ids": ids[start:end], "chunk": chunk,
+                             "start": start, "end": end, "profile_stride": profile_stride,
+                             "state": state, "mtime": mtime, "ordinal": len(work)})
+
+    ordered_work = order_chunk_work(work)
+    if ordered_work and ordered_work[0]["state"] == "partial":
+        print(f"Resuming latest partial checkpoint first: {ordered_work[0]['chunk']}", flush=True)
+    changed_training_conditions = set()
+    changed_test_conditions = set()
+    for item in ordered_work:
+        name, ratio, split, chunk = item["name"], item["ratio"], item["split"], item["chunk"]
+        start, end, profile_stride = item["start"], item["end"], item["profile_stride"]
+
+        def record_decode_failures(payload: dict) -> None:
+            chunk_errors = decode_failure_records(
+                payload, item["ids"], model_dir, start, ratio, protocol,
+                profile_stride, method, random_seed, important_ratio, fastv_k,
+            )
+            decode_failures.extend(
+                {"condition": name, "split": split,
+                 "sample_id": error["sample_id"], "error": error["error"]}
+                for error in chunk_errors
+            )
+            print(f"[{name}] Deferring {len(chunk_errors)} saved decoder failures in {chunk}", flush=True)
+
+        if item["state"] == "retry_errors":
+            record_decode_failures(torch.load(chunk, map_location="cpu", weights_only=False))
             continue
-        retention_path.write_text(json.dumps(retention, indent=2) + "\n")
-        print(f"[{name}] Extraction and cost summaries complete", flush=True)
+
+        command = [sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
+                   "--index-csv", str(item["index"]), "--output-pt", str(chunk),
+                   "--model-dir", str(model_dir), "--start", str(start),
+                   "--limit", str(end - start), "--retain-ratio", str(ratio),
+                   "--profile-stride", str(profile_stride),
+                   "--log-every", str(args.log_every),
+                   "--save-every", str(args.save_every),
+                   "--decode-timeout-seconds", str(args.decode_timeout_seconds),
+                   "--defer-saved-errors"]
+        if method == "random":
+            command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
+        elif method == "uniform":
+            command.extend(["--pruning", "uniform"])
+        elif method == "vispruner":
+            command.extend(["--pruning", "vispruner", "--important-ratio", str(important_ratio)])
+        elif method == "visionzip":
+            command.extend(["--pruning", "visionzip"])
+        elif method == "fastv":
+            command.extend(["--pruning", "fastv", "--fastv-k", str(fastv_k)])
+        elif method == "sparsevlm":
+            command.extend(["--pruning", "sparsevlm"])
+        if split == "test":
+            changed_test_conditions.add(name)
+        else:
+            changed_training_conditions.add(name)
+        try:
+            run(command, env)
+        except subprocess.CalledProcessError:
+            if not chunk.is_file():
+                raise
+            record_decode_failures(torch.load(chunk, map_location="cpu", weights_only=False))
+
+    failures_path = output_dir / "decode_failures.json"
+    if decode_failures:
+        failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
+        print(f"Continuing with {len(decode_failures)} recorded decoder failures; "
+              f"see {failures_path}", flush=True)
+    else:
+        failures_path.unlink(missing_ok=True)
+
+    coverage_by_condition = {}
+    for ratio, name in zip(args.ratios, names):
+        folder = output_dir / name
+        retention = {}
+        coverage = {}
+        for split, info in split_inputs[name].items():
+            run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
+                 "--chunks-dir", str(info["chunks_dir"]), "--output-pt", str(info["embedding_pt"]),
+                 "--pattern", f"{split}_*.pt"], env)
+            coverage[split] = verify_available_embeddings(info["embedding_pt"], info["ids"])
+            retention[split] = summarize_embedding_cost(
+                info["embedding_pt"], ratio, coverage[split]["embedded"])
+            retention[split]["indexed_samples"] = coverage[split]["indexed"]
+            retention[split]["missing_samples"] = coverage[split]["missing"]
+        (folder / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
+        (folder / "cost_summary.json").write_text(json.dumps(retention, indent=2) + "\n")
+        coverage_by_condition[name] = coverage
+        print(f"[{name}] Embeddings merged; split coverage={coverage}", flush=True)
 
         for seed in args.seeds:
             mlp_dir = folder / "mlp" / f"seed_{seed}"
             metrics_path = mlp_dir / "metrics.json"
-            if not metrics_path.is_file() or not (mlp_dir / "best_mlp.pt").is_file():
+            train_changed = (name in changed_training_conditions
+                             or not training_metrics_match(metrics_path, coverage))
+            if train_changed:
                 run([sys.executable, str(REPO_ROOT / "scripts" / "classification" / "mosei_mlp.py"),
                      "train", "--train-pt", str(folder / "embeddings" / "mosei_train.pt"),
                      "--train-index", str(index_dir / "mosei_train_index.csv"),
                      "--valid-pt", str(folder / "embeddings" / "mosei_valid.pt"),
                      "--valid-index", str(index_dir / "mosei_valid_index.csv"),
                      "--output-dir", str(mlp_dir), "--seed", str(seed), "--device", "cuda"], env)
-            metrics = json.loads(metrics_path.read_text())
-            if any(metrics["coverage"][split]["embedded"] != SPLIT_COUNTS[index_split]
-                   or metrics["coverage"][split]["missing"] != 0
-                   for split, index_split in (("train", "train"), ("validation", "valid"))):
-                raise RuntimeError(f"Incomplete matched MLP coverage: {metrics_path}")
+            if not training_metrics_match(metrics_path, coverage):
+                raise RuntimeError(f"Matched MLP metrics do not match extraction coverage: {metrics_path}")
             if args.test_all:
                 test_dir = folder / "test_eval" / f"seed_{seed}"
                 test_metrics = test_dir / "metrics.json"
-                if (not test_metrics.is_file()
-                        or json.loads(test_metrics.read_text())["metrics"]["sample_count"] != SPLIT_COUNTS["test"]):
+                if (train_changed or name in changed_test_conditions
+                        or not test_metrics_match(test_metrics, coverage["test"])):
                     run([sys.executable, str(REPO_ROOT / "scripts" / "classification" / "mosei_mlp.py"),
                          "evaluate", "--checkpoint", str(mlp_dir / "best_mlp.pt"),
                          "--embeddings-pt", str(folder / "embeddings" / "mosei_test.pt"),
                          "--index", str(index_dir / "mosei_test_index.csv"),
                          "--output-dir", str(test_dir), "--device", "cuda"], env)
-    if decode_failures:
-        failures_path = output_dir / "decode_failures.json"
-        failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
-        raise RuntimeError(
-            f"{len(decode_failures)} clips could not be decoded; all other chunks were saved. "
-            f"See {failures_path}. Repair those clips and rerun to finish the curve."
-        )
-    (output_dir / "decode_failures.json").unlink(missing_ok=True)
+                if not test_metrics_match(test_metrics, coverage["test"]):
+                    raise RuntimeError(f"Test metrics do not match extraction coverage: {test_metrics}")
     write_curve(output_dir, names, tuple(args.seeds), method, random_seed)
-    print(f"{method} curve complete: {output_dir / 'validation_curve.csv'}", flush=True)
+    coverage_complete = all(values["missing"] == 0
+                            for condition in coverage_by_condition.values()
+                            for values in condition.values())
+    (output_dir / "summary.json").write_text(json.dumps({
+        "method": method,
+        "evaluated_splits": splits,
+        "coverage_complete": coverage_complete,
+        "evaluation_scope": "all_indexed_clips" if coverage_complete else "successfully_decoded_clips_only",
+        "coverage_by_condition": coverage_by_condition,
+        "decoder_failures": len(decode_failures),
+    }, indent=2) + "\n")
+    marker = output_dir / ("completed_utc.txt" if coverage_complete else "completed_partial_utc.txt")
+    marker.write_text(datetime.now(timezone.utc).isoformat() + "\n")
+    (output_dir / ("completed_partial_utc.txt" if coverage_complete else "completed_utc.txt")).unlink(missing_ok=True)
+    print(f"{method} curve complete; full coverage={coverage_complete}: "
+          f"{output_dir / 'validation_curve.csv'}", flush=True)
     return 0
 
 

@@ -383,11 +383,16 @@ and MLP training progress to stdout and appends it to
 `tail -F ../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. It uses
 the same `--log-every` and `--save-every` options as the baseline.
 All MOSEI token-curve launchers also use the baseline's decoder-failure
-handling: they continue with later chunks, splits, and retention conditions
-after a fully attempted chunk contains only Decord failures. They write
-`decode_failures.json` in the curve output directory and stop before publishing
-an incomplete curve. Rerun the same command after repairing the clips to
-resume saved embeddings. Model or other extraction failures still stop the run.
+handling: on restart they resume the newest partial chunk first and visit only
+clips without a saved embedding or decoder failure. They skip earlier decoder
+failures, continue across splits and retention conditions, then train the
+matched MLPs on available embeddings. Each ratio writes `coverage.json` and
+`cost_summary.json`; the curve CSV reports indexed, embedded, and missing clip
+counts. The root `decode_failures.json` lists omitted clips. Results with
+different missing samples are partial and require an aligned-ID comparison
+before paper-level claims. Root `summary.json` and the completion marker state
+whether coverage is full or partial. Model or other extraction failures still
+stop the run.
 
 ## 5. Matched random-token control
 
