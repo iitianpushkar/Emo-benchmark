@@ -22,7 +22,7 @@ from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
-    verify_embeddings,
+    verify_available_embeddings as verify_embeddings,
 )
 
 DEFAULT_RATIOS = (1.0, .9, .8, .7, .6, .5, .4, .3, .25, .2, .15, .1, .05)
