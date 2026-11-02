@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
+from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
@@ -111,24 +112,6 @@ def metrics_complete(path: Path) -> bool:
         return False
 
 
-def config_differences(previous: dict, current: dict) -> dict:
-    """Show exactly why a saved run cannot be resumed as the same experiment."""
-    differences = {}
-    missing = "<missing>"
-
-    def compare(old: dict, new: dict, prefix: str = "") -> None:
-        for key in sorted(old.keys() | new.keys()):
-            path = f"{prefix}.{key}" if prefix else key
-            before, after = old.get(key, missing), new.get(key, missing)
-            if isinstance(before, dict) and isinstance(after, dict):
-                compare(before, after, path)
-            elif before != after:
-                differences[path] = {"previous": before, "current": after}
-
-    compare(previous, current)
-    return differences
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -195,18 +178,7 @@ def main() -> int:
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
-    if config_path.is_file():
-        previous = json.loads(config_path.read_text())
-        if previous != config:
-            differences = config_differences(previous, config)
-            raise ValueError(
-                f"Run configuration changed: {config_path}\n"
-                f"Differences: {json.dumps(differences, indent=2, sort_keys=True)}\n"
-                "Keep the saved results. Resume with the original settings, or use a "
-                "new --output-dir for a different experiment."
-            )
-    else:
-        config_path.write_text(json.dumps(config, indent=2) + "\n")
+    record_resume_config(config_path, config)
 
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"

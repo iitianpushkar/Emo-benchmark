@@ -30,6 +30,7 @@ os.environ.setdefault("DEEPFACE_BACKEND_ENGINE", "onnx")
 
 from cluster.live_log import activate_live_log
 from cluster.preflight import verify_meld
+from cluster.resume_config import record_resume_config
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment
 
 MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -224,44 +225,6 @@ def code_revision() -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                             text=True, capture_output=True, check=False)
     return result.stdout.strip() if result.returncode == 0 else None
-
-
-def validate_resume_config(previous: dict, current: dict, output: Path) -> None:
-    """Permit known operational updates without mixing incompatible embeddings."""
-    # run_config.json turns tuples (such as CONTROL_SEEDS) into lists. Compare
-    # the serialized form so a resume does not mistake that for a setting change.
-    current = json.loads(json.dumps(current))
-    operational = {"code_revision", "retinaface_runtime"}
-    previous_revision = str(previous.get("code_revision") or "")
-    missing_weight_hash = "retinaface_weights_sha256" not in previous
-    if missing_weight_hash and previous_revision.startswith("6b076c1"):
-        # The first resumable version did not record the detector weight hash.
-        # Its outputs cannot be tied to the staged weights, so reuse is safe
-        # only if no embedding or classifier artifact has been written yet.
-        artifacts = (list((output / "cache").rglob("*.pt"))
-                     + list((output / "chunks").rglob("*.pt"))
-                     + list(output.glob("face_*.pt")))
-        if not artifacts:
-            operational.add("retinaface_weights_sha256")
-    old_science = {key: value for key, value in previous.items() if key not in operational}
-    new_science = {key: value for key, value in current.items() if key not in operational}
-    differences = {key: {"previous": old_science.get(key, "<missing>"),
-                         "current": new_science.get(key, "<missing>")}
-                   for key in sorted(old_science.keys() | new_science.keys())
-                   if old_science.get(key, "<missing>") != new_science.get(key, "<missing>")}
-    compatible_revision = (any(previous_revision.startswith(revision) for revision in
-                               ("6b076c1", "aefe030", "c3ea2c3", "e730ac3", "7a1bc6b"))
-                           or previous_revision == str(current.get("code_revision")))
-    if differences or not compatible_revision:
-        if not compatible_revision:
-            differences["code_revision"] = {"previous": previous.get("code_revision"),
-                                            "current": current.get("code_revision")}
-        raise ValueError(
-            f"Output directory has different run settings: {output / 'run_config.json'}\n"
-            f"Differences: {json.dumps(differences, indent=2, default=str)}\n"
-            "Use a new --output-dir for a different experiment; do not delete cached embeddings."
-        )
-    print(f"Resuming {output} with compatible run settings", flush=True)
 
 
 def run_live(command: list[str]) -> None:
@@ -787,17 +750,14 @@ def main() -> int:
               "frame_size": args.frame_size, "prompt_style": "emotion_task", "pooling": "last",
               "detector": "retinaface", "overlap_fraction": args.overlap_fraction,
               "control_seeds": CONTROL_SEEDS, "skip_controls": args.skip_controls,
+              "chunk_size": args.chunk_size,
               "limit_per_split": args.limit_per_split, "profile_every": args.profile_every,
               "seed": args.seed, "epochs": args.epochs,
               "versions": {"torch": torch.__version__, "transformers": transformers.__version__,
                            **face_dependencies}}
     output.mkdir(parents=True, exist_ok=True)
     config_path = output / "run_config.json"
-    if config_path.is_file():
-        previous = json.loads(config_path.read_text())
-        if previous != json.loads(json.dumps(config)):
-            validate_resume_config(previous, config, output)
-    atomic_json(config_path, config)
+    record_resume_config(config_path, json.loads(json.dumps(config)), legacy_chunk_size=500)
 
     index_dir = output / "indexes"
     run_live([sys.executable, "-u", str(REPO / "scripts/data/prepare_meld.py"),

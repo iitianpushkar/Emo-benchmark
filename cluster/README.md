@@ -341,6 +341,10 @@ unsaved progress between checkpoints to four clips. On normal interruption
 before exiting. A forced SIGKILL or node failure leaves the last periodic
 checkpoint. A restart reuses verified complete chunks and resumes incomplete
 chunks from saved sample IDs.
+All cluster experiment launchers gate a resume on `--chunk-size` only. They
+print other changed run settings and append those configurations to
+`resume_configs.json`; saved chunks still undergo their own sample-ID and
+extraction-setting checks before reuse.
 
 This prepares train/valid/test indexes, extracts frozen video-and-transcript
 embeddings for all 22,856 clips, checks complete coverage, trains the six-output

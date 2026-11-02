@@ -34,3 +34,10 @@ to `../../results/qwen2_5_vl_7b_mosei/`, including `run_config.json`,
 `outputs/metrics.json`, `cost_summary.json`, combined `summary.json`, and
 prediction CSVs. A completed run writes
 `completed_utc.txt`.
+
+On restart, the launcher requires the original `--chunk-size`. Changes to
+the Git revision, GPU allocation, package versions, or resolved paths are
+printed but do not stop the run; each changed configuration is recorded in
+`resume_configs.json`, while `run_config.json` holds the latest settings.
+Individual saved chunks still have their own configuration and sample-ID
+checks before reuse.

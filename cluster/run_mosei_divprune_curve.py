@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
+from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
     HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, run, sha256,
@@ -362,11 +363,7 @@ def main(method: str = "divprune") -> int:
         config["recycling"] = "top_30_percent_discarded_then_density_cluster_mean"
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
-    if config_path.is_file():
-        if json.loads(config_path.read_text()) != config:
-            raise ValueError(f"Run configuration changed; use another output directory: {config_path}")
-    else:
-        config_path.write_text(json.dumps(config, indent=2) + "\n")
+    record_resume_config(config_path, config)
     if args.test_all and not (output_dir / "validation_curve.csv").is_file():
         raise ValueError("Run the complete validation curve before --test-all")
 
