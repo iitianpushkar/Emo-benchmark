@@ -79,34 +79,22 @@ def index_ids(path: Path, expected: int) -> list[str]:
     return ids
 
 
-def verify_embeddings(path: Path, expected_ids: list[str]) -> None:
-    import torch
-
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    ids = [str(value) for value in payload["sample_ids"]]
-    embeddings = payload["embeddings"]
-    errors = payload.get("errors", [])
-    if errors:
-        raise ValueError(f"{path}: {len(errors)} extraction errors; first examples: {errors[:3]}")
-    if embeddings.ndim != 2 or embeddings.shape != (len(expected_ids), HIDDEN_SIZE):
-        raise ValueError(f"{path}: expected embedding shape {(len(expected_ids), HIDDEN_SIZE)}, got {tuple(embeddings.shape)}")
-    if len(set(ids)) != len(ids) or set(ids) != set(expected_ids):
-        raise ValueError(f"{path}: sample IDs differ from the split index")
-    if not torch.isfinite(embeddings).all():
-        raise ValueError(f"{path}: embeddings contain NaN or infinity")
-    print(f"Verified {path}: {len(ids)} complete embeddings", flush=True)
-
-
-def metrics_complete(path: Path) -> bool:
-    if not path.is_file() or not (path.parent / "best_mlp.pt").is_file() or not (path.parent / "test_predictions.csv").is_file():
+def metrics_match_coverage(path: Path, split_coverage: dict[str, dict[str, int]]) -> bool:
+    if (not path.is_file() or not (path.parent / "best_mlp.pt").is_file()
+            or not (path.parent / "test_predictions.csv").is_file()
+            or not (path.parent / "validation_predictions.csv").is_file()):
         return False
     try:
         report = json.loads(path.read_text())
         coverage = report["coverage"]
+        for split, report_split in (("train", "train"), ("valid", "validation"), ("test", "test")):
+            expected = split_coverage[split]
+            if any(coverage[report_split][key] != expected[key]
+                   for key in ("indexed", "embedded", "missing")):
+                return False
         return (
-            all(coverage[split]["embedded"] == expected and coverage[split]["missing"] == 0
-                for split, expected in (("train", 16326), ("validation", 1871), ("test", 4659)))
-            and report["test"]["sample_count"] == SPLIT_COUNTS["test"]
+            report["validation"]["sample_count"] == split_coverage["valid"]["embedded"]
+            and report["test"]["sample_count"] == split_coverage["test"]["embedded"]
         )
     except (OSError, ValueError, KeyError, TypeError):
         return False
@@ -133,16 +121,11 @@ def complete_baseline_chunk(payload: dict, expected_ids: list[str], model_dir: P
 
 
 def order_chunk_work(chunks: list[dict]) -> list[dict]:
-    """Resume recent partial checkpoints, then new chunks, then old decode failures."""
+    """Resume recent partial checkpoints, then unvisited clips; defer old failures."""
     return sorted(chunks, key=lambda item: (
         {"partial": 0, "new": 1, "retry_errors": 2}[item["state"]],
         -item["mtime"] if item["state"] == "partial" else item["ordinal"],
     ))
-
-
-def selected_splits(extract_split: str | None) -> tuple[str, ...]:
-    """Limit an extraction-only job to its requested split."""
-    return (extract_split,) if extract_split else tuple(SPLIT_COUNTS)
 
 
 def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Path,
@@ -171,6 +154,41 @@ def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Pa
     return errors
 
 
+def embedding_coverage(sample_ids: list[str], errors: list[dict],
+                       expected_ids: list[str]) -> dict[str, int]:
+    """Require every indexed clip to have either an embedding or a recorded failure."""
+    failed_ids = [error.get("sample_id") for error in errors]
+    observed = sample_ids + failed_ids
+    if (len(observed) != len(expected_ids) or len(set(observed)) != len(expected_ids)
+            or set(observed) != set(expected_ids)):
+        raise ValueError("Saved embeddings and failures do not cover the indexed split exactly")
+    return {"indexed": len(expected_ids), "embedded": len(sample_ids),
+            "missing": len(failed_ids)}
+
+
+def verify_available_embeddings(path: Path, expected_ids: list[str]) -> dict[str, int]:
+    import torch
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    ids = [str(value) for value in payload["sample_ids"]]
+    embeddings = payload["embeddings"]
+    errors = payload.get("errors", [])
+    coverage = embedding_coverage(ids, errors, expected_ids)
+    if embeddings.ndim != 2 or tuple(embeddings.shape) != (len(ids), HIDDEN_SIZE):
+        raise ValueError(f"{path}: invalid embedding shape {tuple(embeddings.shape)}")
+    if not torch.isfinite(embeddings).all():
+        raise ValueError(f"{path}: embeddings contain NaN or infinity")
+    if not ids:
+        raise ValueError(f"{path}: no usable embeddings")
+    if any(not str(error.get("error", "")).startswith(
+            ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+            for error in errors):
+        raise ValueError(f"{path}: contains non-decoder extraction errors")
+    print(f"Verified {path}: {coverage['embedded']}/{coverage['indexed']} embeddings; "
+          f"missing={coverage['missing']}", flush=True)
+    return coverage
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -185,8 +203,6 @@ def main() -> int:
                         help="Checkpoint embeddings every N new clips")
     parser.add_argument("--decode-timeout-seconds", type=float, default=10,
                         help="Skip clips whose Decord decode exceeds this many seconds")
-    parser.add_argument("--extract-split", choices=tuple(SPLIT_COUNTS),
-                        help="Extract only this split; skip classifier training and other splits")
     parser.add_argument("--verify-only", action="store_true", help="Validate local inputs without starting GPU work")
     args = parser.parse_args()
     if (args.chunk_size <= 0 or args.log_every <= 0 or args.save_every <= 0
@@ -252,8 +268,7 @@ def main() -> int:
 
     split_inputs = {}
     work = []
-    for split in selected_splits(args.extract_split):
-        expected = SPLIT_COUNTS[split]
+    for split, expected in SPLIT_COUNTS.items():
         profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
@@ -282,10 +297,11 @@ def main() -> int:
     if ordered_work and ordered_work[0]["state"] == "partial":
         print(f"Resuming latest partial checkpoint first: {ordered_work[0]['chunk']}", flush=True)
     decode_failures = []
+    attempted_new_clips = False
     for item in ordered_work:
         split, index, chunk = item["split"], item["index"], item["chunk"]
         start, end, profile_stride = item["start"], item["end"], item["profile_stride"]
-        if args.extract_split and item["state"] == "retry_errors":
+        if item["state"] == "retry_errors":
             payload = torch.load(chunk, map_location="cpu", weights_only=False)
             chunk_errors = verified_decode_errors(
                 payload, item["ids"], model_dir, start, video_protocol, profile_stride)
@@ -303,8 +319,8 @@ def main() -> int:
                  "--log-every", str(args.log_every),
                  "--save-every", str(args.save_every),
                  "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
-            if args.extract_split:
-                command.append("--defer-saved-errors")
+            command.append("--defer-saved-errors")
+            attempted_new_clips = True
             run(command, env)
         except subprocess.CalledProcessError:
             if not chunk.is_file():
@@ -320,36 +336,29 @@ def main() -> int:
                   "continuing to the next chunk", flush=True)
 
     cost_path = output_dir / "cost_summary.json"
-    cost_summaries = (json.loads(cost_path.read_text())
-                      if args.extract_split and cost_path.is_file() else {})
-    failed_splits = {error["split"] for error in decode_failures}
+    cost_summaries = {}
+    split_coverage = {}
     for split, info in split_inputs.items():
-        if split in failed_splits:
-            print(f"{split}: decoder failures remain; skipping merge", flush=True)
-            continue
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
              "--chunks-dir", str(info["chunks_dir"]), "--output-pt", str(info["embedding_pt"]),
              "--pattern", f"{split}_*.pt"], env)
-        verify_embeddings(info["embedding_pt"], info["ids"])
+        split_coverage[split] = verify_available_embeddings(info["embedding_pt"], info["ids"])
         cost_summaries[split] = summarize_embedding_cost(
-            info["embedding_pt"], 1.0, info["expected"])
+            info["embedding_pt"], 1.0, split_coverage[split]["embedded"])
+        cost_summaries[split]["indexed_samples"] = info["expected"]
+        cost_summaries[split]["missing_samples"] = split_coverage[split]["missing"]
         cost_path.write_text(json.dumps(cost_summaries, indent=2) + "\n")
 
-    failures_name = f"decode_failures_{args.extract_split}.json" if args.extract_split else "decode_failures.json"
-    failures_path = output_dir / failures_name
+    failures_path = output_dir / "decode_failures.json"
     if decode_failures:
         failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
-        raise RuntimeError(
-            f"{len(decode_failures)} clips could not be decoded; all other chunks were saved. "
-            f"See {failures_path}. Repair those clips and rerun to finish merging and training."
-        )
-    failures_path.unlink(missing_ok=True)
-    if args.extract_split:
-        print(f"{args.extract_split} extraction complete; other splits and classifier were skipped", flush=True)
-        return 0
+        print(f"Continuing with {len(decode_failures)} recorded decoder failures; "
+              f"see {failures_path}", flush=True)
+    else:
+        failures_path.unlink(missing_ok=True)
 
     metrics_path = output_dir / "outputs" / "metrics.json"
-    if not metrics_complete(metrics_path):
+    if attempted_new_clips or not metrics_match_coverage(metrics_path, split_coverage):
         run([sys.executable, str(REPO_ROOT / "scripts" / "classification" / "mosei_mlp.py"), "train",
              "--train-pt", str(output_dir / "embeddings" / "mosei_train.pt"),
              "--train-index", str(index_dir / "mosei_train_index.csv"),
@@ -358,15 +367,21 @@ def main() -> int:
              "--test-pt", str(output_dir / "embeddings" / "mosei_test.pt"),
              "--test-index", str(index_dir / "mosei_test_index.csv"),
              "--output-dir", str(output_dir / "outputs"), "--device", "cuda"], env)
-    if not metrics_complete(metrics_path):
-        raise RuntimeError(f"Classifier metrics incomplete: {metrics_path}")
+    if not metrics_match_coverage(metrics_path, split_coverage):
+        raise RuntimeError(f"Classifier metrics do not match extracted sample coverage: {metrics_path}")
+    coverage_complete = all(values["missing"] == 0 for values in split_coverage.values())
     (output_dir / "summary.json").write_text(json.dumps({
         "model_id": MODEL_ID,
+        "coverage_complete": coverage_complete,
+        "coverage": split_coverage,
+        "evaluation_scope": "all_indexed_clips" if coverage_complete else "successfully_decoded_clips_only",
         "performance": json.loads(metrics_path.read_text()),
         "cost": cost_summaries,
     }, indent=2) + "\n")
-    (output_dir / "completed_utc.txt").write_text(datetime.now(timezone.utc).isoformat() + "\n")
-    print(f"Full baseline complete: {metrics_path}", flush=True)
+    marker = output_dir / ("completed_utc.txt" if coverage_complete else "completed_partial_utc.txt")
+    marker.write_text(datetime.now(timezone.utc).isoformat() + "\n")
+    (output_dir / ("completed_partial_utc.txt" if coverage_complete else "completed_utc.txt")).unlink(missing_ok=True)
+    print(f"Baseline evaluation complete; full coverage={coverage_complete}: {metrics_path}", flush=True)
     return 0
 
 

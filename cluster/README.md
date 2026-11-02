@@ -331,30 +331,24 @@ are recorded in the chunk's `errors`, and extraction continues with the next
 clip. Set `--decode-timeout-seconds N` on the launcher to change the limit.
 This is an operational timeout; extraction continues to the end of the current
 chunk and saves all successful embeddings. The baseline launcher continues
-through the remaining chunks and splits, then writes `decode_failures.json`
-and stops before final metrics because full coverage is required. Repair those
-clips and rerun the same output directory to fill the missing embeddings.
+through the remaining chunks and splits, writes `decode_failures.json`, and
+trains and evaluates on successfully decoded clips. The resulting metrics
+include per-split coverage and must be reported as partial when clips failed.
 Embeddings are checkpointed atomically every 25 newly attempted clips and
 at normal chunk completion. Pass `--save-every 5` to reduce the maximum
 unsaved progress between checkpoints to four clips. On normal interruption
 (Ctrl-C or a scheduler SIGTERM), the extractor also saves completed clips
 before exiting. A forced SIGKILL or node failure leaves the last periodic
-checkpoint. A restart reuses verified complete chunks and resumes incomplete
-chunks from saved sample IDs. The baseline processes the newest partial
-checkpoint first, then untouched chunks, then chunks that were fully attempted
-but still have decoder failures. This lets an interrupted test chunk continue
-before retrying older train decode failures.
-To continue only the interrupted test extraction without revisiting train or
-validation, run the baseline launcher with `--extract-split test` and the same
-`--chunk-size`. This mode saves and verifies test chunks and skips classifier
-training. Previously recorded decoder failures are deferred, allowing clips
-that have never been attempted to finish first. If failures remain, it writes
-`decode_failures_test.json` and keeps all successful test embeddings. A later
-full run can retry those failures and compute complete-coverage metrics.
+checkpoint. A restart reuses verified complete chunks and resumes the newest
+partial checkpoint first. Saved decoder failures are never retried by the main
+launcher: it visits only clips without a saved embedding or failure, then
+merges available embeddings and continues through classifier evaluation.
+Already attempted train and validation chunks are reused, including those with
+recorded decoder failures.
 
 ```bash
 ~/hf-env/bin/python -u cluster/run_mosei_qwen2_5vl7b_baseline.py \
-  --root ../.. --chunk-size 500 --extract-split test
+  --root ../.. --chunk-size 500
 ```
 All cluster experiment launchers gate a resume on `--chunk-size` only. They
 print other changed run settings and append those configurations to
@@ -362,7 +356,8 @@ print other changed run settings and append those configurations to
 extraction-setting checks before reuse.
 
 This prepares train/valid/test indexes, extracts frozen video-and-transcript
-embeddings for all 22,856 clips, checks complete coverage, trains the six-output
+embeddings for the available clips, checks that every indexed clip has either
+an embedding or a recorded decoder failure, trains the six-output
 MLP with validation-based checkpoint and threshold selection, and evaluates
 the test split. It saves artifacts under `../../results/qwen2_5_vl_7b_mosei/`.
 The launcher uses local model files and sets offline Hub mode for child

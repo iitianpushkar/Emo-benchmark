@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cluster.run_mosei_qwen2_5vl7b_baseline import (
-    complete_baseline_chunk, order_chunk_work, selected_splits,
-    verified_decode_errors,
+    complete_baseline_chunk, embedding_coverage, metrics_match_coverage,
+    order_chunk_work, verified_decode_errors,
 )
 
 
@@ -25,9 +25,36 @@ class BaselineResumeOrderTests(unittest.TestCase):
         chunks = [{"state": "new", "mtime": 0, "ordinal": i} for i in range(3)]
         self.assertEqual(order_chunk_work(chunks), chunks)
 
-    def test_test_only_extraction_never_selects_train_or_validation(self):
-        self.assertEqual(selected_splits("test"), ("test",))
-        self.assertEqual(selected_splits(None), ("train", "valid", "test"))
+    def test_saved_failures_cover_split_without_retry(self):
+        self.assertEqual(embedding_coverage(
+            ["a", "c"], [{"sample_id": "b", "error": "TimeoutError: Decord exceeded 10s"}],
+            ["a", "b", "c"]), {"indexed": 3, "embedded": 2, "missing": 1})
+        with self.assertRaises(ValueError):
+            embedding_coverage(["a", "c"], [], ["a", "b", "c"])
+
+    def test_classifier_metrics_accept_reported_partial_coverage(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            for name in ("best_mlp.pt", "test_predictions.csv", "validation_predictions.csv"):
+                (output / name).touch()
+            split_coverage = {
+                "train": {"indexed": 3, "embedded": 2, "missing": 1},
+                "valid": {"indexed": 2, "embedded": 2, "missing": 0},
+                "test": {"indexed": 2, "embedded": 1, "missing": 1},
+            }
+            report = {"coverage": {"train": split_coverage["train"],
+                                   "validation": split_coverage["valid"],
+                                   "test": split_coverage["test"]},
+                      "validation": {"sample_count": 2}, "test": {"sample_count": 1}}
+            path = output / "metrics.json"
+            path.write_text(json.dumps(report))
+            self.assertTrue(metrics_match_coverage(path, split_coverage))
+            report["coverage"]["test"]["embedded"] = 2
+            path.write_text(json.dumps(report))
+            self.assertFalse(metrics_match_coverage(path, split_coverage))
 
     def test_successful_saved_chunk_is_reused(self):
         protocol = {"fps": 6}

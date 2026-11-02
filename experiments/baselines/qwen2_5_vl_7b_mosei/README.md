@@ -18,8 +18,9 @@ actual frame count, resized dimensions, token counts, synchronized latency,
 and process GPU allocation. About 128 evenly spaced clips per split receive
 a separate counted forward for theoretical shape-based TFLOPs. Counting
 does not enter the latency measurement. Chunk files and final
-embeddings use separate paths for each split. Extraction must cover every
-indexed sample with no recorded errors before classification starts.
+embeddings use separate paths for each split. On restart, successful embeddings
+and saved decoder failures are reused; only clips without a saved attempt are
+processed. The classifier uses available embeddings and reports split coverage.
 
 Changing the frame size changes the run configuration; any earlier 448 × 448
 artifacts must use a separate output directory. Verify GPU memory on an H100
@@ -32,8 +33,11 @@ once with that saved model and those fixed thresholds. Artifacts are written
 to `../../results/qwen2_5_vl_7b_mosei/`, including `run_config.json`,
 `indexes/`, `chunks/`, `embeddings/`, `outputs/best_mlp.pt`,
 `outputs/metrics.json`, `cost_summary.json`, combined `summary.json`, and
-prediction CSVs. A completed run writes
-`completed_utc.txt`.
+prediction CSVs. A run with all clips represented by embeddings writes
+`completed_utc.txt`. If decoder failures remain, it writes
+`decode_failures.json` and `completed_partial_utc.txt`, and `summary.json`
+marks the evaluation scope as successfully decoded clips only. Such metrics
+must not be presented as a complete MOSEI test result.
 
 On restart, the launcher requires the original `--chunk-size`. Changes to
 the Git revision, GPU allocation, package versions, or resolved paths are
