@@ -112,6 +112,34 @@ def metrics_complete(path: Path) -> bool:
         return False
 
 
+def complete_baseline_chunk(payload: dict, expected_ids: list[str], model_dir: Path,
+                            start: int, video_protocol: dict, profile_stride: int) -> bool:
+    saved_ids = payload.get("sample_ids", [])
+    config = payload.get("config", {})
+    return (
+        not payload.get("errors")
+        and len(set(saved_ids)) == len(expected_ids)
+        and set(saved_ids) == set(expected_ids)
+        and tuple(payload["embeddings"].shape) == (len(expected_ids), HIDDEN_SIZE)
+        and config.get("model_dir") == str(model_dir)
+        and config.get("start") == start
+        and config.get("limit") == len(expected_ids)
+        and config.get("video_protocol") == video_protocol
+        and config.get("retain_ratio") == 1.0
+        and config.get("pruning") == "none"
+        and config.get("profile_stride") == profile_stride
+        and len(payload.get("metadata", [])) == len(expected_ids)
+    )
+
+
+def order_chunk_work(chunks: list[dict]) -> list[dict]:
+    """Resume recent partial checkpoints, then new chunks, then old decode failures."""
+    return sorted(chunks, key=lambda item: (
+        {"partial": 0, "new": 1, "retry_errors": 2}[item["state"]],
+        -item["mtime"] if item["state"] == "partial" else item["ordinal"],
+    ))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1],
@@ -187,84 +215,92 @@ def main() -> int:
          "--mosei-root", str(mosei_root),
          "--output-dir", str(index_dir)], env)
 
-    cost_summaries = {}
-    decode_failures = []
+    import torch
+
+    split_inputs = {}
+    work = []
     for split, expected in SPLIT_COUNTS.items():
         profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
-        chunks_dir = output_dir / "chunks" / split
-        embedding_pt = output_dir / "embeddings" / f"mosei_{split}.pt"
-        split_decode_failures = []
+        split_inputs[split] = {"expected": expected, "ids": ids,
+                               "chunks_dir": output_dir / "chunks" / split,
+                               "embedding_pt": output_dir / "embeddings" / f"mosei_{split}.pt"}
         for start in range(0, expected, args.chunk_size):
             end = min(start + args.chunk_size, expected)
-            chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
+            chunk = split_inputs[split]["chunks_dir"] / f"{split}_{start:05d}_{end:05d}.pt"
+            state, mtime = "new", 0.0
             if chunk.is_file():
-                import torch
-
                 payload = torch.load(chunk, map_location="cpu", weights_only=False)
-                expected_chunk_ids = ids[start:end]
-                if (not payload.get("errors")
-                        and len(set(payload.get("sample_ids", []))) == end - start
-                        and set(payload["sample_ids"]) == set(expected_chunk_ids)
-                        and tuple(payload["embeddings"].shape) == (end - start, HIDDEN_SIZE)
-                        and payload.get("config", {}).get("model_dir") == str(model_dir)
-                        and payload.get("config", {}).get("start") == start
-                        and payload.get("config", {}).get("limit") == end - start
-                        and payload.get("config", {}).get("video_protocol") == video_protocol
-                        and payload.get("config", {}).get("retain_ratio") == 1.0
-                        and payload.get("config", {}).get("pruning") == "none"
-                        and payload.get("config", {}).get("profile_stride") == profile_stride
-                        and len(payload.get("metadata", [])) == end - start):
+                if complete_baseline_chunk(payload, ids[start:end], model_dir,
+                                           start, video_protocol, profile_stride):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
-            try:
-                run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
-                     "--index-csv", str(index), "--output-pt", str(chunk),
-                     "--model-dir", str(model_dir), "--start", str(start),
-                     "--limit", str(end - start), "--profile-stride", str(profile_stride),
-                     "--log-every", str(args.log_every),
-                     "--save-every", str(args.save_every),
-                     "--decode-timeout-seconds", str(args.decode_timeout_seconds)], env)
-            except subprocess.CalledProcessError:
-                if not chunk.is_file():
-                    raise
-                payload = torch.load(chunk, map_location="cpu", weights_only=False)
-                chunk_errors = payload.get("errors", [])
-                observed_ids = list(payload.get("sample_ids", [])) + [
-                    error.get("sample_id") for error in chunk_errors
-                ]
-                chunk_config = payload.get("config", {})
-                if (len(observed_ids) != end - start
-                        or len(set(observed_ids)) != end - start
-                        or set(observed_ids) != set(ids[start:end])
-                        or chunk_config.get("model_dir") != str(model_dir)
-                        or chunk_config.get("start") != start
-                        or chunk_config.get("limit") != end - start
-                        or chunk_config.get("video_protocol") != video_protocol
-                        or chunk_config.get("pruning") != "none"
-                        or chunk_config.get("retain_ratio") != 1.0
-                        or not chunk_errors
-                        or any(not str(error.get("error", "")).startswith(
-                            ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
-                            for error in chunk_errors)):
-                    raise
-                split_decode_failures.extend(
-                    {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
-                    for error in chunk_errors
-                )
-                print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
-                      "continuing to the next chunk", flush=True)
-        if split_decode_failures:
-            decode_failures.extend(split_decode_failures)
-            print(f"{split}: {len(split_decode_failures)} clips need decoder repair; "
-                  "all other chunks have been extracted", flush=True)
+                attempted = len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
+                state = "partial" if attempted < end - start else "retry_errors"
+                mtime = chunk.stat().st_mtime
+            work.append({"split": split, "index": index, "ids": ids[start:end],
+                         "start": start, "end": end, "chunk": chunk,
+                         "profile_stride": profile_stride, "state": state,
+                         "mtime": mtime, "ordinal": len(work)})
+
+    ordered_work = order_chunk_work(work)
+    if ordered_work and ordered_work[0]["state"] == "partial":
+        print(f"Resuming latest partial checkpoint first: {ordered_work[0]['chunk']}", flush=True)
+    decode_failures = []
+    for item in ordered_work:
+        split, index, chunk = item["split"], item["index"], item["chunk"]
+        start, end, profile_stride = item["start"], item["end"], item["profile_stride"]
+        try:
+            run([sys.executable, str(REPO_ROOT / "cluster" / "extract_mosei_qwen2_5vl.py"),
+                 "--index-csv", str(index), "--output-pt", str(chunk),
+                 "--model-dir", str(model_dir), "--start", str(start),
+                 "--limit", str(end - start), "--profile-stride", str(profile_stride),
+                 "--log-every", str(args.log_every),
+                 "--save-every", str(args.save_every),
+                 "--decode-timeout-seconds", str(args.decode_timeout_seconds)], env)
+        except subprocess.CalledProcessError:
+            if not chunk.is_file():
+                raise
+            payload = torch.load(chunk, map_location="cpu", weights_only=False)
+            chunk_errors = payload.get("errors", [])
+            observed_ids = list(payload.get("sample_ids", [])) + [
+                error.get("sample_id") for error in chunk_errors
+            ]
+            chunk_config = payload.get("config", {})
+            if (len(observed_ids) != end - start
+                    or len(set(observed_ids)) != end - start
+                    or set(observed_ids) != set(item["ids"])
+                    or chunk_config.get("model_dir") != str(model_dir)
+                    or chunk_config.get("start") != start
+                    or chunk_config.get("limit") != end - start
+                    or chunk_config.get("video_protocol") != video_protocol
+                    or chunk_config.get("pruning") != "none"
+                    or chunk_config.get("retain_ratio") != 1.0
+                    or not chunk_errors
+                    or any(not str(error.get("error", "")).startswith(
+                        ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+                        for error in chunk_errors)):
+                raise
+            decode_failures.extend(
+                {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
+                for error in chunk_errors
+            )
+            print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
+                  "continuing to the next chunk", flush=True)
+
+    cost_summaries = {}
+    failed_splits = {error["split"] for error in decode_failures}
+    for split, info in split_inputs.items():
+        if split in failed_splits:
+            print(f"{split}: decoder failures remain; skipping merge", flush=True)
             continue
         run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
-             "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
+             "--chunks-dir", str(info["chunks_dir"]), "--output-pt", str(info["embedding_pt"]),
              "--pattern", f"{split}_*.pt"], env)
-        verify_embeddings(embedding_pt, ids)
-        cost_summaries[split] = summarize_embedding_cost(embedding_pt, 1.0, expected)
+        verify_embeddings(info["embedding_pt"], info["ids"])
+        cost_summaries[split] = summarize_embedding_cost(
+            info["embedding_pt"], 1.0, info["expected"])
         (output_dir / "cost_summary.json").write_text(json.dumps(cost_summaries, indent=2) + "\n")
 
     if decode_failures:

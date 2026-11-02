@@ -340,7 +340,10 @@ unsaved progress between checkpoints to four clips. On normal interruption
 (Ctrl-C or a scheduler SIGTERM), the extractor also saves completed clips
 before exiting. A forced SIGKILL or node failure leaves the last periodic
 checkpoint. A restart reuses verified complete chunks and resumes incomplete
-chunks from saved sample IDs.
+chunks from saved sample IDs. The baseline processes the newest partial
+checkpoint first, then untouched chunks, then chunks that were fully attempted
+but still have decoder failures. This lets an interrupted test chunk continue
+before retrying older train decode failures.
 All cluster experiment launchers gate a resume on `--chunk-size` only. They
 print other changed run settings and append those configurations to
 `resume_configs.json`; saved chunks still undergo their own sample-ID and
