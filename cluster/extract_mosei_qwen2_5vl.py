@@ -116,6 +116,7 @@ def main():
         config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
     if args.pruning == "visionzip":
         config["attention_source"] = "last_full_qwen_vision_block_received_attention_and_keys"
+        config["attention_score_reduction"] = "mean_heads_sum_queries_per_attention_segment_v3"
         config["merging"] = "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
     if args.pruning == "fastv":
         config["fastv_k"] = args.fastv_k

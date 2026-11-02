@@ -5,12 +5,13 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cluster.qwen_vispruner_attention import received_attention
+from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture, received_attention
 from scripts.pruning.vispruner import build_vispruner_sequence_indices, select_vispruner_token_indices
 
 
@@ -55,6 +56,31 @@ class VisPrunerTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(scores).all())
         self.assertAlmostEqual(float(scores[:2].sum()), 1.0, places=6)
         self.assertAlmostEqual(float(scores[2:].sum()), 1.0, places=6)
+
+    def test_no_cls_score_averages_heads_and_queries_then_merges_four_patches(self):
+        attention = SimpleNamespace(num_heads=2)
+        visual = SimpleNamespace(
+            fullatt_block_indexes=[0],
+            blocks=[SimpleNamespace(attn=attention)],
+            spatial_merge_unit=4,
+            get_window_index=lambda _grid: (torch.arange(2), None),
+        )
+        model = SimpleNamespace(model=SimpleNamespace(visual=visual))
+        capture = QwenVisionAttentionCapture(model, torch.tensor([[2, 2, 2]]))
+        capture._position_embeddings = (torch.ones(8, 2), torch.zeros(8, 2))
+        capture._cu_seqlens = torch.tensor([0, 8])
+        qkv = torch.zeros(8, 3, 2, 2)
+        qkv[:, 0, 0, 0] = 1
+        qkv[:4, 1, 0, 0] = 2  # Head 0 favors the first merged token.
+        # Head 1 stays uniform; both heads and all queries must contribute.
+        capture._qkv(None, None, qkv.reshape(8, -1))
+
+        preferred_patch = torch.softmax(
+            torch.tensor([2 / 2**0.5] * 4 + [0.0] * 4), dim=0,
+        )[0]
+        expected_first = (preferred_patch + 1 / 8) / 2
+        torch.testing.assert_close(capture.scores[0], expected_first, rtol=0, atol=1e-7)
+        torch.testing.assert_close(capture.scores.sum(), torch.tensor(0.25), rtol=0, atol=1e-7)
 
 
 if __name__ == "__main__":

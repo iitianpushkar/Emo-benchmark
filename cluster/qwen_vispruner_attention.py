@@ -17,7 +17,11 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def received_attention(qkv: torch.Tensor, position_embeddings: tuple[torch.Tensor, torch.Tensor],
                        cu_seqlens: torch.Tensor, heads: int) -> torch.Tensor:
-    """Mean across heads and queries of attention received by each patch."""
+    """VisPruner no-CLS score: mean received attention over heads and queries.
+
+    Qwen2.5-VL's attention segments are scored separately. The caller then
+    averages four patch scores per spatially merged language-model token.
+    """
     length = qkv.shape[0]
     q, k, _ = qkv.reshape(length, 3, heads, -1).permute(1, 0, 2, 3).unbind(0)
     cos, sin = position_embeddings
@@ -85,10 +89,9 @@ class QwenVisionAttentionCapture:
 class QwenVisionZipCapture(QwenVisionAttentionCapture):
     """Capture VisionZip's received-attention scores and vision keys.
 
-    The official Qwen2.5 image implementation averages the final vision block's
-    attention over heads, sums over queries, and averages the four patch scores
-    and keys feeding each spatially merged language-model token. For video we
-    apply that calculation separately to every attention segment.
+    Follow the released Qwen2.5 code: average over heads, sum over queries,
+    then average four patch scores and keys per merged visual token. Video
+    attention is reduced within each Qwen attention segment.
     """
 
     def __init__(self, model, video_grid_thw: torch.Tensor):

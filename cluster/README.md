@@ -368,6 +368,12 @@ and MLP training progress to stdout and appends it to
 `../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. Follow it with
 `tail -F ../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. It uses
 the same `--log-every` and `--save-every` options as the baseline.
+All MOSEI token-curve launchers also use the baseline's decoder-failure
+handling: they continue with later chunks, splits, and retention conditions
+after a fully attempted chunk contains only Decord failures. They write
+`decode_failures.json` in the curve output directory and stop before publishing
+an incomplete curve. Rerun the same command after repairing the clips to
+resume saved embeddings. Model or other extraction failures still stop the run.
 
 ## 5. Matched random-token control
 

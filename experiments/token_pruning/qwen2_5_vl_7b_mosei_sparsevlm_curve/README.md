@@ -7,9 +7,13 @@ The [SparseVLM paper](https://proceedings.mlr.press/v267/zhang25s.html)
 Qwen2-VL in that table is a different backbone from our Qwen2.5-VL-7B.
 The publicly released v1.5 branch used here as code reference implements the
 LLaVA path; this run does not claim to reproduce its Qwen2-VL benchmark scores.
-The reference code selects text raters from embedding similarity, scores video
-tokens by rater-to-visual decoder attention, prunes after decoder layers 2, 6,
-and 15 (zero-based), and recycles a clustered subset of the discarded tokens.
+The released v1.5 LLaVA code defaults to fixed decoder-layer indices 2, 6,
+and 15 (zero-based). We transfer those locations to Qwen2.5-VL without a
+Qwen-specific layer-placement ablation; the rank rule changes the number of
+tokens removed at each location, not the locations themselves. The reference
+code selects text raters from embedding similarity, scores visual tokens by
+rater-to-visual decoder attention, and recycles a clustered subset of the
+discarded tokens.
 The adaptation follows these operations on Qwen's video-token positions and
 multimodal RoPE, preserving nonvideo tokens and prompt order.
 

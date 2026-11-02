@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +64,7 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and (method != "vispruner" or config.get("important_ratio") == important_ratio)
         and (method != "visionzip" or (
             config.get("attention_source") == "last_full_qwen_vision_block_received_attention_and_keys"
+            and config.get("attention_score_reduction") == "mean_heads_sum_queries_per_attention_segment_v3"
             and config.get("merging") == "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
         ))
         and (method != "fastv" or config.get("fastv_k") == fastv_k)
@@ -79,6 +81,51 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
             for sample_id, item in zip(saved_ids, payload["metadata"])
         ))
     )
+
+
+def decode_failure_records(payload: dict, expected_ids: list[str], model_dir: Path,
+                           start: int, ratio: float, protocol: dict,
+                           profile_stride: int, method: str,
+                           random_seed: int | None, important_ratio: float,
+                           fastv_k: int) -> list[dict]:
+    """Accept only fully attempted chunks whose failures are video decoding errors."""
+    errors = payload.get("errors", [])
+    saved_ids = [str(value) for value in payload.get("sample_ids", [])]
+    error_ids = [error.get("sample_id") for error in errors]
+    observed_ids = saved_ids + error_ids
+    config = payload.get("config", {})
+    expected_pruning = ((f"fastv_after_layer_{fastv_k}_video_tokens" if method == "fastv"
+                         else "sparsevlm_progressive_decoder_video_tokens" if method == "sparsevlm"
+                         else f"{method}_projected_video_tokens") if ratio < 1 else "none")
+    if (not errors or len(observed_ids) != len(expected_ids)
+            or len(set(observed_ids)) != len(expected_ids)
+            or set(observed_ids) != set(expected_ids)
+            or tuple(payload["embeddings"].shape) != (len(saved_ids), HIDDEN_SIZE)
+            or len(payload.get("metadata", [])) != len(saved_ids)
+            or config.get("model_dir") != str(model_dir)
+            or config.get("start") != start or config.get("limit") != len(expected_ids)
+            or config.get("video_protocol") != protocol
+            or config.get("retain_ratio") != ratio
+            or config.get("pruning") != expected_pruning
+            or config.get("profile_stride") != profile_stride
+            or config.get("random_seed") != random_seed
+            or (method == "vispruner" and config.get("important_ratio") != important_ratio)
+            or (method == "visionzip" and (
+                config.get("attention_source") != "last_full_qwen_vision_block_received_attention_and_keys"
+                or config.get("attention_score_reduction") != "mean_heads_sum_queries_per_attention_segment_v3"
+                or config.get("merging") != "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
+            ))
+            or (method == "fastv" and config.get("fastv_k") != fastv_k)
+            or (method == "sparsevlm" and (
+                config.get("sparsevlm_stages") != [2, 6, 15]
+                or config.get("sparsevlm_schedule") != "matrix_rank_lambda_geometric_with_final_budget_cap_v1"
+                or config.get("recycling") != "top_30_percent_discarded_then_density_cluster_mean"
+            ))
+            or any(not str(error.get("error", "")).startswith(
+                ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
+                for error in errors)):
+        raise ValueError("Chunk failed for a reason other than completed decoder timeouts/errors")
+    return errors
 
 
 def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
@@ -303,6 +350,7 @@ def main(method: str = "divprune") -> int:
         config["attention_source"] = "last_full_qwen_vision_block_mean_received_attention"
     if method == "visionzip":
         config["attention_source"] = "last_full_qwen_vision_block_received_attention_and_keys"
+        config["attention_score_reduction"] = "mean_heads_sum_queries_per_attention_segment_v3"
         config["merging"] = "official_qwen_65_to_5_scaled_budget_with_temporal_group_isolation_v1"
     if method == "fastv":
         config["fastv_k"] = fastv_k
@@ -328,12 +376,14 @@ def main(method: str = "divprune") -> int:
     run([sys.executable, str(REPO_ROOT / "scripts" / "data" / "prepare_mosei.py"),
          "--mosei-root", str(mosei_root), "--output-dir", str(index_dir)], env)
     splits = ("train", "valid", "test") if args.test_all else ("train", "valid")
+    decode_failures = []
 
     for ratio, name in zip(args.ratios, names):
         print(f"[{name}] Starting retention ratio {ratio:.0%}", flush=True)
         folder = output_dir / name
         retention_path = folder / "cost_summary.json"
         retention = json.loads(retention_path.read_text()) if retention_path.is_file() else {}
+        ratio_has_decode_failures = False
         for split in splits:
             print(f"[{name}] Starting {split} split ({SPLIT_COUNTS[split]} clips)", flush=True)
             expected = SPLIT_COUNTS[split]
@@ -342,6 +392,7 @@ def main(method: str = "divprune") -> int:
             ids = index_ids(index, expected)
             chunks_dir = folder / "chunks" / split
             embedding_pt = folder / "embeddings" / f"mosei_{split}.pt"
+            split_decode_failures = []
             for start in range(0, expected, args.chunk_size):
                 end = min(start + args.chunk_size, expected)
                 chunk = chunks_dir / f"{split}_{start:05d}_{end:05d}.pt"
@@ -369,12 +420,39 @@ def main(method: str = "divprune") -> int:
                     command.extend(["--pruning", "fastv", "--fastv-k", str(fastv_k)])
                 elif method == "sparsevlm":
                     command.extend(["--pruning", "sparsevlm"])
-                run(command, env)
+                try:
+                    run(command, env)
+                except subprocess.CalledProcessError:
+                    if not chunk.is_file():
+                        raise
+                    import torch
+
+                    payload = torch.load(chunk, map_location="cpu", weights_only=False)
+                    chunk_errors = decode_failure_records(
+                        payload, ids[start:end], model_dir, start, ratio, protocol,
+                        profile_stride, method, random_seed, important_ratio, fastv_k,
+                    )
+                    split_decode_failures.extend(
+                        {"condition": name, "split": split,
+                         "sample_id": error["sample_id"], "error": error["error"]}
+                        for error in chunk_errors
+                    )
+                    print(f"Recorded {len(chunk_errors)} decode failures in {chunk}; "
+                          "continuing to the next chunk", flush=True)
+            if split_decode_failures:
+                decode_failures.extend(split_decode_failures)
+                ratio_has_decode_failures = True
+                print(f"[{name}] {split}: {len(split_decode_failures)} clips need "
+                      "decoder repair; other chunks were saved", flush=True)
+                continue
             run([sys.executable, "-m", "scripts", "merge_embedding_chunks",
                  "--chunks-dir", str(chunks_dir), "--output-pt", str(embedding_pt),
                  "--pattern", f"{split}_*.pt"], env)
             verify_embeddings(embedding_pt, ids)
             retention[split] = summarize_embedding_cost(embedding_pt, ratio, expected)
+        if ratio_has_decode_failures:
+            print(f"[{name}] Skipping matched MLP until decoder failures are repaired", flush=True)
+            continue
         retention_path.write_text(json.dumps(retention, indent=2) + "\n")
         print(f"[{name}] Extraction and cost summaries complete", flush=True)
 
@@ -403,6 +481,14 @@ def main(method: str = "divprune") -> int:
                          "--embeddings-pt", str(folder / "embeddings" / "mosei_test.pt"),
                          "--index", str(index_dir / "mosei_test_index.csv"),
                          "--output-dir", str(test_dir), "--device", "cuda"], env)
+    if decode_failures:
+        failures_path = output_dir / "decode_failures.json"
+        failures_path.write_text(json.dumps(decode_failures, indent=2) + "\n")
+        raise RuntimeError(
+            f"{len(decode_failures)} clips could not be decoded; all other chunks were saved. "
+            f"See {failures_path}. Repair those clips and rerun to finish the curve."
+        )
+    (output_dir / "decode_failures.json").unlink(missing_ok=True)
     write_curve(output_dir, names, tuple(args.seeds), method, random_seed)
     print(f"{method} curve complete: {output_dir / 'validation_curve.csv'}", flush=True)
     return 0

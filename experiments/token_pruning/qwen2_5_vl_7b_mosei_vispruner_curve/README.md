@@ -1,18 +1,26 @@
 # Qwen2.5-VL-7B VisPruner on CMU-MOSEI
 
 This is a **planned, unrun adaptation** of the [official ICCV 2025
-VisPruner](https://github.com/Theia-4869/VisPruner) selector. The original
-implementation uses CLIP CLS-to-patch attention on LLaVA images. Qwen2.5-VL
-has no CLS token. Here, each merged video token receives the mean attention
-paid to its four constituent patches across queries and heads in Qwen's last
-full-attention vision block. Attention is recomputed from that block's actual
-Q/K projection and rotary positions while the normal SDPA forward runs. The
-selector ranks tokens by this score, keeps 50% of the requested budget as
+VisPruner](https://github.com/Theia-4869/VisPruner) selector. The released
+code implements LLaVA with CLIP CLS-to-patch attention. The main paper reports
+older Qwen-VL results using a Q-Former; its supplement also evaluates
+Qwen2.5-VL-7B and explicitly selects important tokens using mean attention
+received from all visual tokens without a CLS token. The repository does not
+provide a Qwen2.5-VL implementation to copy. Following that no-CLS rule, we
+average attention received by each patch across heads and queries within each
+Qwen attention segment, then average the four patch scores that form each
+merged video token. This four-patch average maps patch scores to Qwen's visual
+tokens; it is not another pruning or importance rule. Attention is
+recomputed from the last full vision block's Q/K projection and rotary
+positions while the normal SDPA forward runs. The selector ranks tokens by
+this score, keeps 50% of the requested budget as
 important tokens, then repeatedly removes the most cosine-similar tokens from
 the remaining even-indexed partition, as in the official code. Similarity uses
-projected Qwen video features. The important fraction is configurable.
+merged Qwen video embeddings, the same tokens selected for the language model.
+The important fraction is configurable.
 
-The Qwen-specific attention definition and projected-feature boundary mean
+The Qwen-specific patch-to-token mapping, merged-feature similarity, and
+video-wide selection mean
 these results should be called **VisPruner adapted to Qwen2.5-VL**, not a
 reproduction of the published LLaVA numbers. Vision encoding still processes
 all frames. Non-video tokens and original mRoPE positions are preserved.
