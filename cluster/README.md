@@ -429,6 +429,28 @@ pointwise operations may be omitted. FLOP counting uses a separate forward and
 does not enter latency measurements. See each run's `cost_summary.json` and, for DivPrune,
 `validation_curve.csv` and `.png`.
 
+### Seven-class MOSEI evaluation from existing embeddings
+
+The frozen Qwen embeddings also support a separate single-label MLP without
+rerunning video extraction. Run this on the compute node after the baseline
+has finished:
+
+```bash
+~/hf-env/bin/python -u cluster/evaluate_mosei_single_label.py \
+  --source-dir ../../results/qwen2_5_vl_7b_mosei
+```
+
+For any of the seven pruning curve roots, replace `--source-dir` with that
+curve's result directory. The first invocation trains three seeds on train
+and validation embeddings. After the single-label validation results and
+test policy are fixed and the curve's test embeddings exist, repeat with
+`--test-all` for held-out evaluation. Results go under `single_label/` inside
+the source directory. The label rule is maximum positive emotion score;
+tied positive maxima are excluded and all-zero clips are neutral. The output
+records tie exclusions, per-split coverage, accuracy, macro/weighted F1, per-class scores,
+confusion matrices, and per-clip probabilities. These seven-class scores are
+separate from the six-binary-label scores produced by the main launchers.
+
 ## 6. Deterministic uniform-token control
 
 The [uniform-token protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_uniform_curve/README.md)

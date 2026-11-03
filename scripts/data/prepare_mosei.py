@@ -21,7 +21,7 @@ SINGLE_FIELDS = (*FIELDS, "label_status", "max_emotion_score", "tied_emotions")
 SINGLE_LABELS = (*EMOTIONS, "neutral")
 
 
-def single_label(scores: dict[str, float], tie_policy: str = "first", zero_policy: str = "neutral") -> tuple[str | None, str, float, str]:
+def single_label(scores: dict[str, float], tie_policy: str = "exclude", zero_policy: str = "neutral") -> tuple[str | None, str, float, str]:
     """Select one class by maximum score, recording ambiguous selections."""
     if any(value < 0 for value in scores.values()):
         raise ValueError("Single-label MOSEI emotion scores must be nonnegative")
@@ -36,7 +36,7 @@ def single_label(scores: dict[str, float], tie_policy: str = "first", zero_polic
 
 def prepare_rows(
     aligned_csv: Path, raw_dir: Path, include_missing: bool = False,
-    target_mode: str = "multilabel", tie_policy: str = "first", zero_policy: str = "neutral",
+    target_mode: str = "multilabel", tie_policy: str = "exclude", zero_policy: str = "neutral",
 ) -> tuple[dict[str, list[dict[str, str]]], Counter]:
     rows = {split: [] for split in SPLITS}
     missing = Counter()
@@ -120,7 +120,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("data/indexes"))
     parser.add_argument("--include-missing", action="store_true")
     parser.add_argument("--target-mode", choices=("multilabel", "single_max"), default="multilabel")
-    parser.add_argument("--tie-policy", choices=("first", "exclude"), default="first",
+    parser.add_argument("--tie-policy", choices=("first", "exclude"), default="exclude",
                         help="For a tied positive maximum, choose the first emotion in the documented order or exclude the clip.")
     parser.add_argument("--zero-policy", choices=("neutral", "exclude"), default="neutral",
                         help="For clips with no positive emotion score, assign neutral or exclude the clip.")

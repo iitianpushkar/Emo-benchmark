@@ -45,3 +45,25 @@ printed but do not stop the run; each changed configuration is recorded in
 `resume_configs.json`, while `run_config.json` holds the latest settings.
 Individual saved chunks still have their own configuration and sample-ID
 checks before reuse.
+
+## Single-label evaluation from saved embeddings
+
+For a **separate seven-class** evaluation, reuse the merged embeddings without
+loading Qwen again:
+
+```bash
+~/hf-env/bin/python -u cluster/evaluate_mosei_single_label.py \
+  --source-dir ../../results/qwen2_5_vl_7b_mosei
+```
+
+This trains matched 512-hidden-unit MLPs with seeds 42, 43, and 44 and writes
+`single_label/summary.json`, per-seed metrics, prediction CSVs, confusion
+matrices, and checkpoints. The target is the largest of the six MOSEI emotion
+scores; all-zero clips are neutral. Clips tied at the positive maximum are
+excluded from single-label training and evaluation. About 12% of the MOSEI
+labels are tied at the maximum. The output records `excluded_ties` separately
+from decoder failures. If a fixed-order tie-break sensitivity analysis is
+needed, run with `--tie-policy first` in a separate output directory. The
+single-label accuracy, macro F1, and weighted F1 are a distinct
+task from the six-binary-label metrics above. Decoder failures still reduce
+coverage, which is recorded for every split.
