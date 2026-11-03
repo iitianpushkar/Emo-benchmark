@@ -19,3 +19,13 @@ defined by each CSD emotion score being greater than zero.
 The `emotion_id=0` column exists only for compatibility with the legacy scalar-label
 embedding extractors. Use `mosei_mlp.py` to join real targets by `sample_id`; the
 extractors' saved scalar `labels` and MELD `label_names` are not MOSEI targets.
+
+To make a MELD-style, seven-class annotation CSV without requiring local video files,
+run `python3 scripts/data/create_mosei_single_label_csv.py`. It writes
+`dataset/CMU-MOSEI/csv/mosei_single_label.csv`, preserving the original fields
+and adding `utterance`, `emotion`, `emotion_id`, `label_status`, and
+`max_emotion_score`. The class order is happy, sad, anger, surprise, disgust,
+fear, neutral. A unique highest positive score determines the class; positive
+ties are omitted; all-zero scores become neutral. The original aligned CSV is
+left intact. The output keeps source train/valid/test split IDs, and no video
+file check is performed at this annotation-preparation stage.
