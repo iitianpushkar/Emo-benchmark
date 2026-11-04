@@ -29,3 +29,21 @@ fear, neutral. A unique highest positive score determines the class; positive
 ties are omitted; all-zero scores become neutral. The original aligned CSV is
 left intact. The output keeps source train/valid/test split IDs, and no video
 file check is performed at this annotation-preparation stage.
+
+For a fixed seven-class subset restricted to clips with successfully saved
+Qwen2.5-VL-7B baseline embeddings, run:
+
+```bash
+python3 scripts/data/filter_mosei_single_label_by_embeddings.py \
+  --successful-ids-csv /path/to/successful_extraction_ids_all_splits.csv
+```
+
+This writes `dataset/CMU-MOSEI/csv/mosei_single_label_qwen7b_embedded.csv`,
+retaining every column of `mosei_single_label.csv` and its train/valid/test
+split. It contains 12,773 train, 1,471 validation, and 3,657 test rows for the
+current baseline manifest. To create extraction indexes on the cluster, use
+`prepare_mosei.py --aligned-csv` pointing to this CSV, `--mosei-root` pointing
+to the cluster dataset directory, and a distinct `--output-dir`; the index
+builder adds the cluster-local `video_path`. The existing baseline launcher
+still prepares its own full six-label indexes, so this subset is for a
+separately configured seven-class experiment.
