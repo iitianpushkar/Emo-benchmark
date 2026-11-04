@@ -4,16 +4,31 @@ import json
 import tempfile
 import unittest
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from cluster.mosei_decoded_cache import cache_available, cache_paths, identity, publish_cached
-from cluster.predecode_mosei import chunk_state, write_json, write_manifests
+from cluster.predecode_mosei import chunk_state, finished_tasks, write_json, write_manifests
 from cluster.mosei_video_decoder import TimedVideoDecoder
 
 
 class MoseiPredecodeCacheTests(unittest.TestCase):
+    def test_parallel_workers_finish_out_of_order(self):
+        barrier = threading.Barrier(3, timeout=2)
+
+        def decode(row):
+            barrier.wait()
+            return row["sample_id"]
+
+        rows = [(i, {"sample_id": f"v[{i}]"}) for i in range(3)]
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            completed = [(row["sample_id"], future.result()) for (_, row), future in
+                         finished_tasks(rows, executor, decode, 3)]
+        self.assertEqual(set(completed), {(f"v[{i}]", f"v[{i}]") for i in range(3)})
+
     def test_cache_ignores_prompt_but_detects_frame_change(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

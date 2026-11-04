@@ -12,10 +12,14 @@ the Qwen jobs:
 ```bash
 ~/hf-env/bin/python -u cluster/predecode_mosei.py --root ../.. --verify-only
 ~/hf-env/bin/python -u cluster/predecode_mosei.py --root ../.. \
-  --chunk-size 500 --save-every 25 --decode-timeout-seconds 10
+  --chunk-size 500 --workers 6 --save-every 25 --decode-timeout-seconds 10
 ```
 
-Submit the second command as a **CPU compute job**, with no GPU requested.
+Submit the second command as a **CPU compute job**, with no GPU requested. For
+`--cpus-per-task=12`, start with `--workers 6`: each worker has its own Decord
+child process, while the parent writes chunk status as workers finish. Compare
+clips per second and CPU efficiency before raising the worker count. `--workers`
+can change on resume without invalidating saved clips or chunk status.
 Run it again after a wall-time interruption; saved decoded clips are reused,
 and saved failures are skipped. Use `--retry-failed` only when intentionally
 retrying the failed clips. `--splits train`, `--splits valid`, or `--splits test`
