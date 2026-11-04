@@ -228,6 +228,8 @@ def main() -> int:
                         help="Shared parent of codes/, datasets/, models/, and results/")
     parser.add_argument("--model-dir", type=Path, help="Local Qwen2.5-VL-7B-Instruct folder (default: ROOT/models/qwen)")
     parser.add_argument("--mosei-root", type=Path, help="Local MOSEI folder (default: ROOT/datasets/mosei)")
+    parser.add_argument("--decoded-cache-dir", type=Path,
+                        help="Read predecoded frames only; cache misses become recorded decode failures")
     parser.add_argument("--single-label-csv", type=Path,
                         help="Filtered seven-class MOSEI CSV; enables matched single-label baseline")
     parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
@@ -263,6 +265,8 @@ def main() -> int:
     default_run_name = ("qwen2_5_vl_7b_mosei_single_label_emotion_prompt" if single_label_mode
                         else "qwen2_5_vl_7b_mosei")
     output_dir = (args.output_dir or root / "results" / default_run_name).expanduser().resolve()
+    if args.decoded_cache_dir and not args.decoded_cache_dir.expanduser().is_dir():
+        parser.error(f"Decoded cache directory does not exist: {args.decoded_cache_dir}")
     environment = verify_qwen_environment()
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
@@ -273,7 +277,8 @@ def main() -> int:
         print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,
                           "video_protocol": video_protocol, "environment": environment,
                           "annotation_csv": str(annotation_csv), "split_counts": split_counts,
-                          "prompt_style": args.prompt_style, "output_dir": str(output_dir)}, indent=2))
+                          "prompt_style": args.prompt_style, "output_dir": str(output_dir),
+                          "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None}, indent=2))
         return 0
 
     import torch
@@ -305,6 +310,7 @@ def main() -> int:
         "target": ("single highest emotion; positive ties excluded; all-zero neutral"
                    if single_label_mode else "six independent binary emotions; positive iff score > 0"),
         "prompt_style": args.prompt_style,
+        "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
@@ -377,6 +383,8 @@ def main() -> int:
                  "--save-every", str(args.save_every),
                  "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
             command.append("--defer-saved-errors")
+            if args.decoded_cache_dir:
+                command.extend(["--decoded-cache-dir", str(args.decoded_cache_dir.expanduser().resolve())])
             attempted_new_clips = True
             run(command, env)
         except subprocess.CalledProcessError:

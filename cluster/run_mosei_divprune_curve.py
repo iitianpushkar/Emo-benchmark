@@ -279,6 +279,8 @@ def main(method: str = "divprune") -> int:
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--mosei-root", type=Path)
+    parser.add_argument("--decoded-cache-dir", type=Path,
+                        help="Read predecoded frames only; cache misses become recorded decode failures")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--ratios", nargs="+", type=float, default=list(DEFAULT_RATIOS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
@@ -311,6 +313,8 @@ def main(method: str = "divprune") -> int:
         parser.error("Chunk/log/save intervals must be positive and at least one unique seed is required")
     if random_seed is not None and random_seed < 0:
         parser.error("--random-seed must be nonnegative")
+    if args.decoded_cache_dir and not args.decoded_cache_dir.expanduser().is_dir():
+        parser.error(f"Decoded cache directory does not exist: {args.decoded_cache_dir}")
     if not 0 <= important_ratio <= 1:
         parser.error("--important-ratio must be in [0, 1]")
     if fastv_k < 1:
@@ -348,6 +352,7 @@ def main(method: str = "divprune") -> int:
                           "important_ratio": important_ratio if method == "vispruner" else None,
                           "fastv_k": fastv_k if method == "fastv" else None,
                           "ratios": args.ratios, "seeds": args.seeds,
+                          "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None,
                           "environment": environment}, indent=2))
         return 0
 
@@ -368,6 +373,7 @@ def main(method: str = "divprune") -> int:
               "model_config_sha256": sha256(model_dir / "config.json"),
               "model_index_sha256": sha256(model_dir / "model.safetensors.index.json"),
               "mosei_root": str(mosei_root),
+              "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None,
               "aligned_csv_sha256": sha256(mosei_root / "csv" / "mosei_aligned.csv"),
               "code_revision": git_revision(), "protocol": protocol,
               "measurement_environment": {"gpu": torch.cuda.get_device_name(),
@@ -480,6 +486,8 @@ def main(method: str = "divprune") -> int:
                    "--save-every", str(args.save_every),
                    "--decode-timeout-seconds", str(args.decode_timeout_seconds),
                    "--defer-saved-errors"]
+        if args.decoded_cache_dir:
+            command.extend(["--decoded-cache-dir", str(args.decoded_cache_dir.expanduser().resolve())])
         if method == "random":
             command.extend(["--pruning", "random", "--random-seed", str(random_seed)])
         elif method == "uniform":

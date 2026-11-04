@@ -26,6 +26,10 @@ job, run:
   --chunk-size 500
 ```
 
+When the original-MOSEI Decord cache has been built, append
+`--decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1/frames`
+to reuse its sampled frames. See [the predecode instructions](../../../cluster/PREDECODE_MOSEI.md).
+
 Add `--verify-only` to check the local environment, model, dataset, and subset
 counts before using a GPU allocation. The runner uses the existing 224×224,
 6-FPS, 4-to-64-frame video protocol, Decord timeout, per-clip progress,

@@ -7,6 +7,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from cluster.mosei_decoded_cache import identity, load_cached, publish_cached, validate_decoded
+
 
 def _decode_loop(connection):
     os.environ["FORCE_QWENVL_VIDEO_READER"] = "decord"
@@ -39,10 +41,15 @@ def _decode_loop(connection):
 class TimedVideoDecoder:
     """Reuse one CPU decoder process, replacing it after a per-clip timeout."""
 
-    def __init__(self, timeout_seconds: float):
+    def __init__(self, timeout_seconds: float, cache_dir: Path | None = None,
+                 cache_only: bool = False):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self.timeout_seconds = timeout_seconds
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir is not None else None
+        self.cache_only = cache_only
+        if cache_only and self.cache_dir is None:
+            raise ValueError("cache_only requires cache_dir")
         self.context = mp.get_context("spawn")
         scratch = os.environ.get("SLURM_TMPDIR") or None
         self.tempdir = tempfile.TemporaryDirectory(prefix="mosei_decode_", dir=scratch)
@@ -87,9 +94,27 @@ class TimedVideoDecoder:
         if connection is not None:
             connection.close()
 
-    def decode(self, messages, sample_id: str):
+    def decode(self, messages, sample_id: str, video_path: Path | None = None,
+               protocol: dict | None = None):
         import torch
 
+        expected = None
+        if self.cache_dir is not None:
+            if video_path is None or protocol is None:
+                raise ValueError("Cached decoding requires video_path and protocol")
+            expected = identity(sample_id, video_path, protocol)
+            try:
+                cached = load_cached(self.cache_dir, expected)
+            except Exception as exc:
+                if self.cache_only:
+                    raise RuntimeError(f"Video decoding failed for {sample_id}: "
+                                       f"cached decode is invalid: {exc}") from exc
+                cached = None
+            if cached is not None:
+                return cached
+            if self.cache_only:
+                raise RuntimeError(f"Video decoding failed for {sample_id}: "
+                                   "decoded cache entry is missing")
         if self.process is None:
             self._start()
         self.sequence += 1
@@ -109,7 +134,11 @@ class TimedVideoDecoder:
                 raise RuntimeError(f"Video decoder worker exited while reading {sample_id}") from exc
             if status != "ok":
                 raise RuntimeError(f"Video decoding failed for {sample_id}: {detail}")
-            return torch.load(output_path, map_location="cpu", weights_only=False)
+            result = torch.load(output_path, map_location="cpu", weights_only=False)
+            if expected is not None:
+                validate_decoded(result, protocol)
+                publish_cached(self.cache_dir, expected, output_path)
+            return result
         finally:
             output_path.unlink(missing_ok=True)
 

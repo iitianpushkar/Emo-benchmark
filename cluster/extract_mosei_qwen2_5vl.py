@@ -52,6 +52,8 @@ def save(path, embeddings, ids, metadata, errors, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index-csv", type=Path, required=True)
+    parser.add_argument("--decoded-cache-dir", type=Path,
+                        help="Use only predecoded sampled frames from this cache directory")
     parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
                         default="utterance_only")
     parser.add_argument("--output-pt", type=Path, required=True)
@@ -183,7 +185,9 @@ def main():
     processor = AutoProcessor.from_pretrained(str(args.model_dir), local_files_only=True)
     log(f"Model and processor ready in {time.perf_counter() - load_started:.1f}s; "
         f"GPU={torch.cuda.get_device_name(model.device)}")
-    decoder = TimedVideoDecoder(args.decode_timeout_seconds)
+    decoder = (TimedVideoDecoder(args.decode_timeout_seconds, cache_dir=args.decoded_cache_dir,
+                                 cache_only=True) if args.decoded_cache_dir else
+               TimedVideoDecoder(args.decode_timeout_seconds))
     atexit.register(decoder.close)
     log(f"Decord worker timeout: {args.decode_timeout_seconds:g}s per clip")
     processed = 0
@@ -209,7 +213,8 @@ def main():
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             log(f"Decoding {sample_id}")
-            images, videos, video_kwargs = decoder.decode(messages, sample_id)
+            images, videos, video_kwargs = (decoder.decode(messages, sample_id, video_path, video_protocol)
+                                            if args.decoded_cache_dir else decoder.decode(messages, sample_id))
             log(f"Decoded {sample_id} in {time.perf_counter() - sample_started:.1f}s")
             videos, video_metadata = zip(*videos)
             frame_count = int(videos[0].shape[0])
@@ -266,6 +271,7 @@ def main():
             embeddings.append(embedding)
             ids.append(sample_id)
             metadata.append({"video_path": str(video_path), "utterance": row["utterance"],
+                             "video_input_source": "decoded_cache" if args.decoded_cache_dir else "decord",
                              "frame_count": frame_count,
                              "frame_height": frame_height, "frame_width": frame_width,
                              "full_visual_tokens": pruning.full_tokens,
