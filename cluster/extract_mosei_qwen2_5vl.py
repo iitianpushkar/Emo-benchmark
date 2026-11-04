@@ -24,6 +24,7 @@ from cluster.qwen_fastv import FastVHook  # noqa: E402
 from cluster.qwen_sparsevlm import SparseVLMHook  # noqa: E402
 from cluster.qwen_vispruner_attention import QwenVisionAttentionCapture, QwenVisionZipCapture  # noqa: E402
 from cluster.mosei_video_decoder import TimedVideoDecoder  # noqa: E402
+from cluster.mosei_prompt import make_mosei_prompt  # noqa: E402
 from scripts.pruning.random_prune import sample_seed  # noqa: E402
 
 
@@ -51,6 +52,8 @@ def save(path, embeddings, ids, metadata, errors, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index-csv", type=Path, required=True)
+    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+                        default="utterance_only")
     parser.add_argument("--output-pt", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--start", type=int, required=True)
@@ -102,6 +105,7 @@ def main():
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
+    video_protocol["prompt_style"] = args.prompt_style
     config = {"model_dir": str(args.model_dir.resolve()), "start": args.start,
               "limit": args.limit, "video_protocol": video_protocol,
               "pooling": "last_token", "layer": -1, "modality": "video_text",
@@ -111,6 +115,8 @@ def main():
                            else f"{args.pruning}_projected_video_tokens")
                           if args.retain_ratio < 1 else "none"),
               "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
+    if args.prompt_style == "emotion_task":
+        config["prompt_style"] = "mosei_seven_class_emotion_task_v1"
     if args.pruning == "random":
         config["random_seed"] = args.random_seed
     if args.pruning == "vispruner":
@@ -192,12 +198,14 @@ def main():
             video_path = Path(row["video_path"])
             if not video_path.is_file():
                 raise FileNotFoundError(video_path)
+            utterance = row["utterance"]
+            task_text = make_mosei_prompt(utterance, args.prompt_style)
             messages = [{"role": "user", "content": [
                 {"type": "video", "video": video_path.as_uri(), "fps": video_protocol["fps"],
                  "min_frames": video_protocol["min_frames"], "max_frames": video_protocol["max_frames"],
                  "resized_height": video_protocol["frame_size"],
                  "resized_width": video_protocol["frame_size"]},
-                {"type": "text", "text": row["utterance"]},
+                {"type": "text", "text": task_text},
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             log(f"Decoding {sample_id}")

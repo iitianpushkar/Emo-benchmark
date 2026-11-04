@@ -27,6 +27,7 @@ from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
+from scripts.data.prepare_mosei import EMOTIONS, SINGLE_LABELS, single_label  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -79,7 +80,31 @@ def index_ids(path: Path, expected: int) -> list[str]:
     return ids
 
 
-def metrics_match_coverage(path: Path, split_coverage: dict[str, dict[str, int]]) -> bool:
+def single_label_counts(path: Path) -> dict[str, int]:
+    counts = {split: 0 for split in SPLIT_COUNTS}
+    seen = set()
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"sample_id", "split", "emotion", "emotion_id", *EMOTIONS}
+        if not required <= set(reader.fieldnames or ()):
+            raise ValueError(f"{path}: missing {sorted(required - set(reader.fieldnames or ()))}")
+        for row in reader:
+            sample_id, split = row["sample_id"], row["split"]
+            if sample_id in seen or split not in counts:
+                raise ValueError(f"{path}: duplicate ID or unknown split: {sample_id}, {split}")
+            seen.add(sample_id)
+            label, _, _, _ = single_label({name: float(row[name]) for name in EMOTIONS},
+                                          "exclude", "neutral")
+            if label is None or row["emotion"] != label or int(row["emotion_id"]) != SINGLE_LABELS.index(label):
+                raise ValueError(f"{path}: invalid single label for {sample_id}")
+            counts[split] += 1
+    if any(value == 0 for value in counts.values()):
+        raise ValueError(f"{path}: one or more splits are empty")
+    return counts
+
+
+def metrics_match_coverage(path: Path, split_coverage: dict[str, dict[str, int]],
+                           single_label_mode: bool = False) -> bool:
     if (not path.is_file() or not (path.parent / "best_mlp.pt").is_file()
             or not (path.parent / "test_predictions.csv").is_file()
             or not (path.parent / "validation_predictions.csv").is_file()):
@@ -89,8 +114,10 @@ def metrics_match_coverage(path: Path, split_coverage: dict[str, dict[str, int]]
         coverage = report["coverage"]
         for split, report_split in (("train", "train"), ("valid", "validation"), ("test", "test")):
             expected = split_coverage[split]
-            if any(coverage[report_split][key] != expected[key]
-                   for key in ("indexed", "embedded", "missing")):
+            observed = coverage[report_split]
+            missing_key = "missing_decoder" if single_label_mode else "missing"
+            if (any(observed[key] != expected[key] for key in ("indexed", "embedded"))
+                    or observed[missing_key] != expected["missing"]):
                 return False
         return (
             report["validation"]["sample_count"] == split_coverage["valid"]["embedded"]
@@ -101,7 +128,8 @@ def metrics_match_coverage(path: Path, split_coverage: dict[str, dict[str, int]]
 
 
 def complete_baseline_chunk(payload: dict, expected_ids: list[str], model_dir: Path,
-                            start: int, video_protocol: dict, profile_stride: int) -> bool:
+                            start: int, video_protocol: dict, profile_stride: int,
+                            prompt_style: str = "utterance_only") -> bool:
     saved_ids = payload.get("sample_ids", [])
     config = payload.get("config", {})
     return (
@@ -116,6 +144,8 @@ def complete_baseline_chunk(payload: dict, expected_ids: list[str], model_dir: P
         and config.get("retain_ratio") == 1.0
         and config.get("pruning") == "none"
         and config.get("profile_stride") == profile_stride
+        and config.get("prompt_style", "utterance_only") == (
+            "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else "utterance_only")
         and len(payload.get("metadata", [])) == len(expected_ids)
     )
 
@@ -129,7 +159,8 @@ def order_chunk_work(chunks: list[dict]) -> list[dict]:
 
 
 def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Path,
-                           start: int, protocol: dict, profile_stride: int) -> list[dict]:
+                           start: int, protocol: dict, profile_stride: int,
+                           prompt_style: str = "utterance_only") -> list[dict]:
     """Accept an otherwise complete chunk with only video decoder failures."""
     errors = payload.get("errors", [])
     saved_ids = payload.get("sample_ids", [])
@@ -147,6 +178,8 @@ def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Pa
             or config.get("pruning") != "none"
             or config.get("retain_ratio") != 1.0
             or config.get("profile_stride") != profile_stride
+            or config.get("prompt_style", "utterance_only") != (
+                "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else "utterance_only")
             or any(not str(error.get("error", "")).startswith(
                 ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
                 for error in errors)):
@@ -195,6 +228,10 @@ def main() -> int:
                         help="Shared parent of codes/, datasets/, models/, and results/")
     parser.add_argument("--model-dir", type=Path, help="Local Qwen2.5-VL-7B-Instruct folder (default: ROOT/models/qwen)")
     parser.add_argument("--mosei-root", type=Path, help="Local MOSEI folder (default: ROOT/datasets/mosei)")
+    parser.add_argument("--single-label-csv", type=Path,
+                        help="Filtered seven-class MOSEI CSV; enables matched single-label baseline")
+    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+                        default="utterance_only")
     parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=1,
@@ -211,9 +248,21 @@ def main() -> int:
 
     root = args.root.expanduser().resolve()
     video_protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
+    video_protocol["prompt_style"] = args.prompt_style
     model_dir = (args.model_dir or root / "models" / "qwen").expanduser().resolve()
     mosei_root = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
-    output_dir = (args.output_dir or root / "results" / "qwen2_5_vl_7b_mosei").expanduser().resolve()
+    single_label_mode = args.single_label_csv is not None
+    if single_label_mode and args.prompt_style != "emotion_task":
+        parser.error("--single-label-csv requires --prompt-style emotion_task")
+    if not single_label_mode and args.prompt_style != "utterance_only":
+        parser.error("--prompt-style emotion_task requires --single-label-csv")
+    annotation_csv = (args.single_label_csv or mosei_root / "csv" / "mosei_aligned.csv").expanduser().resolve()
+    if not annotation_csv.is_file():
+        raise FileNotFoundError(annotation_csv)
+    split_counts = single_label_counts(annotation_csv) if single_label_mode else SPLIT_COUNTS
+    default_run_name = ("qwen2_5_vl_7b_mosei_single_label_emotion_prompt" if single_label_mode
+                        else "qwen2_5_vl_7b_mosei")
+    output_dir = (args.output_dir or root / "results" / default_run_name).expanduser().resolve()
     environment = verify_qwen_environment()
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
@@ -222,7 +271,9 @@ def main() -> int:
     mosei_root = Path(data["root"]).resolve()
     if args.verify_only:
         print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,
-                          "video_protocol": video_protocol, "environment": environment}, indent=2))
+                          "video_protocol": video_protocol, "environment": environment,
+                          "annotation_csv": str(annotation_csv), "split_counts": split_counts,
+                          "prompt_style": args.prompt_style, "output_dir": str(output_dir)}, indent=2))
         return 0
 
     import torch
@@ -241,7 +292,7 @@ def main() -> int:
         "model_config_sha256": sha256(model_dir / "config.json"),
         "model_index_sha256": sha256(model_dir / "model.safetensors.index.json"),
         "mosei_root": str(mosei_root),
-        "aligned_csv_sha256": sha256(mosei_root / "csv" / "mosei_aligned.csv"),
+        "aligned_csv_sha256": sha256(annotation_csv),
         "code_revision": git_revision(),
         "measurement_environment": {"gpu": torch.cuda.get_device_name(),
                                     "torch": torch.__version__,
@@ -251,7 +302,9 @@ def main() -> int:
         "chunk_size": args.chunk_size,
         "extraction": {**video_protocol, "modality_mode": "video_text",
                        "pooling": "last", "layer": -1, "save_dtype": "float32"},
-        "target": "six independent binary emotions; positive iff score > 0",
+        "target": ("single highest emotion; positive ties excluded; all-zero neutral"
+                   if single_label_mode else "six independent binary emotions; positive iff score > 0"),
+        "prompt_style": args.prompt_style,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
@@ -262,13 +315,15 @@ def main() -> int:
     index_dir = output_dir / "indexes"
     run([sys.executable, str(REPO_ROOT / "scripts" / "data" / "prepare_mosei.py"),
          "--mosei-root", str(mosei_root),
-         "--output-dir", str(index_dir)], env)
+         "--aligned-csv", str(annotation_csv), "--output-dir", str(index_dir),
+         *(["--target-mode", "single_max", "--tie-policy", "exclude",
+            "--zero-policy", "neutral"] if single_label_mode else [])], env)
 
     import torch
 
     split_inputs = {}
     work = []
-    for split, expected in SPLIT_COUNTS.items():
+    for split, expected in split_counts.items():
         profile_stride = max(1, (expected + FLOP_PROFILE_TARGET - 1) // FLOP_PROFILE_TARGET)
         index = index_dir / f"mosei_{split}_index.csv"
         ids = index_ids(index, expected)
@@ -282,7 +337,7 @@ def main() -> int:
             if chunk.is_file():
                 payload = torch.load(chunk, map_location="cpu", weights_only=False)
                 if complete_baseline_chunk(payload, ids[start:end], model_dir,
-                                           start, video_protocol, profile_stride):
+                                           start, video_protocol, profile_stride, args.prompt_style):
                     print(f"Reusing complete chunk {chunk}", flush=True)
                     continue
                 attempted = len(payload.get("sample_ids", [])) + len(payload.get("errors", []))
@@ -304,7 +359,8 @@ def main() -> int:
         if item["state"] == "retry_errors":
             payload = torch.load(chunk, map_location="cpu", weights_only=False)
             chunk_errors = verified_decode_errors(
-                payload, item["ids"], model_dir, start, video_protocol, profile_stride)
+                payload, item["ids"], model_dir, start, video_protocol, profile_stride,
+                args.prompt_style)
             decode_failures.extend(
                 {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
                 for error in chunk_errors
@@ -316,6 +372,7 @@ def main() -> int:
                  "--index-csv", str(index), "--output-pt", str(chunk),
                  "--model-dir", str(model_dir), "--start", str(start),
                  "--limit", str(end - start), "--profile-stride", str(profile_stride),
+                 "--prompt-style", args.prompt_style,
                  "--log-every", str(args.log_every),
                  "--save-every", str(args.save_every),
                  "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
@@ -327,7 +384,8 @@ def main() -> int:
                 raise
             payload = torch.load(chunk, map_location="cpu", weights_only=False)
             chunk_errors = verified_decode_errors(
-                payload, item["ids"], model_dir, start, video_protocol, profile_stride)
+                payload, item["ids"], model_dir, start, video_protocol, profile_stride,
+                args.prompt_style)
             decode_failures.extend(
                 {"split": split, "sample_id": error["sample_id"], "error": error["error"]}
                 for error in chunk_errors
@@ -358,8 +416,9 @@ def main() -> int:
         failures_path.unlink(missing_ok=True)
 
     metrics_path = output_dir / "outputs" / "metrics.json"
-    if attempted_new_clips or not metrics_match_coverage(metrics_path, split_coverage):
-        run([sys.executable, str(REPO_ROOT / "scripts" / "classification" / "mosei_mlp.py"), "train",
+    if attempted_new_clips or not metrics_match_coverage(metrics_path, split_coverage, single_label_mode):
+        classifier = ("mosei_single_label_mlp.py" if single_label_mode else "mosei_mlp.py")
+        run([sys.executable, str(REPO_ROOT / "scripts" / "classification" / classifier), "train",
              "--train-pt", str(output_dir / "embeddings" / "mosei_train.pt"),
              "--train-index", str(index_dir / "mosei_train_index.csv"),
              "--valid-pt", str(output_dir / "embeddings" / "mosei_valid.pt"),
@@ -367,11 +426,14 @@ def main() -> int:
              "--test-pt", str(output_dir / "embeddings" / "mosei_test.pt"),
              "--test-index", str(index_dir / "mosei_test_index.csv"),
              "--output-dir", str(output_dir / "outputs"), "--device", "cuda"], env)
-    if not metrics_match_coverage(metrics_path, split_coverage):
+    if not metrics_match_coverage(metrics_path, split_coverage, single_label_mode):
         raise RuntimeError(f"Classifier metrics do not match extracted sample coverage: {metrics_path}")
     coverage_complete = all(values["missing"] == 0 for values in split_coverage.values())
     (output_dir / "summary.json").write_text(json.dumps({
         "model_id": MODEL_ID,
+        "target": config["target"],
+        "prompt_style": args.prompt_style,
+        "annotation_csv": str(annotation_csv),
         "coverage_complete": coverage_complete,
         "coverage": split_coverage,
         "evaluation_scope": "all_indexed_clips" if coverage_complete else "successfully_decoded_clips_only",
