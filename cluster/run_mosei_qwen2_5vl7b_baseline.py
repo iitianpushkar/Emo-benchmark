@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.live_log import activate_live_log  # noqa: E402
+from cluster.mosei_cache_subset import cached_single_label_rows, resolve_cache_frames, write_subset  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.resume_config import record_resume_config  # noqa: E402
@@ -231,7 +232,7 @@ def main() -> int:
     parser.add_argument("--decoded-cache-dir", type=Path,
                         help="Read predecoded frames only; cache misses become recorded decode failures")
     parser.add_argument("--single-label-csv", type=Path,
-                        help="Filtered seven-class MOSEI CSV; enables matched single-label baseline")
+                        help="Seven-class MOSEI ground-truth CSV; with a decoded cache, select only cached clips")
     parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
                         default="utterance_only")
     parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
@@ -258,27 +259,45 @@ def main() -> int:
         parser.error("--single-label-csv requires --prompt-style emotion_task")
     if not single_label_mode and args.prompt_style != "utterance_only":
         parser.error("--prompt-style emotion_task requires --single-label-csv")
-    annotation_csv = (args.single_label_csv or mosei_root / "csv" / "mosei_aligned.csv").expanduser().resolve()
-    if not annotation_csv.is_file():
-        raise FileNotFoundError(annotation_csv)
-    split_counts = single_label_counts(annotation_csv) if single_label_mode else SPLIT_COUNTS
-    default_run_name = ("qwen2_5_vl_7b_mosei_single_label_emotion_prompt" if single_label_mode
+    ground_truth_csv = (args.single_label_csv or mosei_root / "csv" / "mosei_aligned.csv").expanduser().resolve()
+    if not ground_truth_csv.is_file():
+        raise FileNotFoundError(ground_truth_csv)
+    if single_label_mode:
+        single_label_counts(ground_truth_csv)
+    default_run_name = (("qwen2_5_vl_7b_mosei_single_label_emotion_prompt_cache_success"
+                         if args.decoded_cache_dir else "qwen2_5_vl_7b_mosei_single_label_emotion_prompt") if single_label_mode
                         else "qwen2_5_vl_7b_mosei")
     output_dir = (args.output_dir or root / "results" / default_run_name).expanduser().resolve()
-    if args.decoded_cache_dir and not args.decoded_cache_dir.expanduser().is_dir():
-        parser.error(f"Decoded cache directory does not exist: {args.decoded_cache_dir}")
+    try:
+        decoded_cache_dir = resolve_cache_frames(args.decoded_cache_dir) if args.decoded_cache_dir else None
+    except ValueError as exc:
+        parser.error(str(exc))
     environment = verify_qwen_environment()
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
     print(f"Verifying MOSEI annotation and clip paths at {mosei_root}", flush=True)
     data = verify_mosei(mosei_root, progress_every=500)
     mosei_root = Path(data["root"]).resolve()
+    annotation_csv = ground_truth_csv
+    cache_selection = None
+    subset_fields = subset_rows = None
+    if single_label_mode and decoded_cache_dir:
+        subset_fields, subset_rows, cache_selection = cached_single_label_rows(
+            ground_truth_csv, decoded_cache_dir,
+            mosei_root / "Raw", video_protocol)
+        split_counts = cache_selection["selected"]
+        annotation_csv = output_dir / "cached_single_label_subset.csv"
+        print(f"Cache-success single-label selection: {json.dumps(cache_selection)}", flush=True)
+    else:
+        split_counts = single_label_counts(ground_truth_csv) if single_label_mode else SPLIT_COUNTS
     if args.verify_only:
         print(json.dumps({"model_id": MODEL_ID, "model": model, "data": data,
                           "video_protocol": video_protocol, "environment": environment,
+                          "ground_truth_csv": str(ground_truth_csv),
                           "annotation_csv": str(annotation_csv), "split_counts": split_counts,
+                          "cache_selection": cache_selection,
                           "prompt_style": args.prompt_style, "output_dir": str(output_dir),
-                          "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None}, indent=2))
+                          "decoded_cache_dir": str(decoded_cache_dir) if decoded_cache_dir else None}, indent=2))
         return 0
 
     import torch
@@ -290,6 +309,8 @@ def main() -> int:
 
     activate_live_log(output_dir / "run.log")
     print(f"Starting Qwen2.5-VL-7B MOSEI baseline on {gpu_name}", flush=True)
+    if subset_rows is not None:
+        write_subset(annotation_csv, subset_fields, subset_rows)
 
     config = {
         "model_id": MODEL_ID,
@@ -297,6 +318,8 @@ def main() -> int:
         "model_config_sha256": sha256(model_dir / "config.json"),
         "model_index_sha256": sha256(model_dir / "model.safetensors.index.json"),
         "mosei_root": str(mosei_root),
+        "ground_truth_csv": str(ground_truth_csv),
+        "ground_truth_csv_sha256": sha256(ground_truth_csv),
         "aligned_csv_sha256": sha256(annotation_csv),
         "code_revision": git_revision(),
         "measurement_environment": {"gpu": torch.cuda.get_device_name(),
@@ -310,7 +333,7 @@ def main() -> int:
         "target": ("single highest emotion; positive ties excluded; all-zero neutral"
                    if single_label_mode else "six independent binary emotions; positive iff score > 0"),
         "prompt_style": args.prompt_style,
-        "decoded_cache_dir": str(args.decoded_cache_dir.expanduser().resolve()) if args.decoded_cache_dir else None,
+        "decoded_cache_dir": str(decoded_cache_dir) if decoded_cache_dir else None,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "run_config.json"
@@ -383,8 +406,8 @@ def main() -> int:
                  "--save-every", str(args.save_every),
                  "--decode-timeout-seconds", str(args.decode_timeout_seconds)]
             command.append("--defer-saved-errors")
-            if args.decoded_cache_dir:
-                command.extend(["--decoded-cache-dir", str(args.decoded_cache_dir.expanduser().resolve())])
+            if decoded_cache_dir:
+                command.extend(["--decoded-cache-dir", str(decoded_cache_dir)])
             attempted_new_clips = True
             run(command, env)
         except subprocess.CalledProcessError:
@@ -442,6 +465,8 @@ def main() -> int:
         "target": config["target"],
         "prompt_style": args.prompt_style,
         "annotation_csv": str(annotation_csv),
+        "ground_truth_csv": str(ground_truth_csv),
+        "cache_selection": cache_selection,
         "coverage_complete": coverage_complete,
         "coverage": split_coverage,
         "evaluation_scope": "all_indexed_clips" if coverage_complete else "successfully_decoded_clips_only",
