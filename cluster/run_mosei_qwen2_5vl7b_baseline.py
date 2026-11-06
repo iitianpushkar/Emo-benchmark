@@ -272,6 +272,8 @@ def main() -> int:
         decoded_cache_dir = resolve_cache_frames(args.decoded_cache_dir) if args.decoded_cache_dir else None
     except ValueError as exc:
         parser.error(str(exc))
+    if not args.verify_only:
+        activate_live_log(output_dir / "run.log")
     environment = verify_qwen_environment()
     print(f"Verifying Qwen2.5-VL-7B model files at {model_dir}", flush=True)
     model = verify_model(model_dir, "qwen")
@@ -307,7 +309,6 @@ def main() -> int:
 
     gpu_name = require_cuda_gpu(torch)
 
-    activate_live_log(output_dir / "run.log")
     print(f"Starting Qwen2.5-VL-7B MOSEI baseline on {gpu_name}", flush=True)
     if subset_rows is not None:
         write_subset(annotation_csv, subset_fields, subset_rows)
