@@ -7,6 +7,13 @@ classifier predicts six independent binary MOSEI emotions; macro F1 across the
 six labels is the primary metric. These results must not be compared numerically
 with seven-class MELD macro F1.
 
+The [seven-class cache-success mode](../../../cluster/README.md#4-divprune-token-retention-curve)
+uses the full MOSEI single-label ground truth, valid cached frames, and the
+baseline's emotion-task prompt. It writes a separate curve with seven-class
+accuracy and macro F1 at 5%, 10%, 15%, 20%, 25%, 30%, 50%, 70%, then 90%
+retention, in that execution order. It does not extract or plot a 100% point;
+that can be added from the full baseline later.
+
 ## Fixed protocol
 
 - Local checkpoint: `Qwen/Qwen2.5-VL-7B-Instruct`. No model downloads occur in the
@@ -63,7 +70,12 @@ python cluster/run_mosei_divprune_curve.py --root ../..
 ```
 
 The resumable outputs go to `../../results/qwen2_5_vl_7b_mosei_divprune_curve/`.
-The launcher records model and data hashes, Git revision, requested ratios,
+For each clip, the launcher decodes and preprocesses once, then runs the
+requested ratios in order before advancing to the next clip. Each ratio keeps
+its own resumable embedding chunks. Per-ratio end-to-end latency includes the
+shared preprocessing time and that ratio's forward pass; summing per-ratio
+latencies counts shared work more than once. The launcher records model and data
+hashes, Git revision, requested ratios,
 actual token counts, synchronized latency, process GPU allocation, theoretical
 forward TFLOPs, chunk metadata, MLP checkpoints and predictions,
 `cost_summary.json` and `coverage.json` for each ratio, and
@@ -73,10 +85,9 @@ IDs. Use a new `--output-dir` after changing the experiment protocol. A shorter
 smoke sweep can be selected explicitly with `--ratios 1 .3 .05`, but it is a
 different protocol and must use a different output directory.
 
-Once the full validation curve and selection rule are fixed, evaluate the
-predeclared conditions on held-out test with the same command plus `--test-all`.
-This reuses the train/validation artifacts, extracts test embeddings, and scores
-the saved MLP checkpoints. Report the entire test curve, seed spread, actual
+The same run extracts train, validation, and test embeddings, then scores test
+with each validation-selected MLP checkpoint. Report the entire test curve,
+seed spread, actual
 retention, and any failed samples. Do not pick a winning retention after seeing
 test scores. The matched [random-token control](../qwen2_5_vl_7b_mosei_random_curve/README.md)
 runs as separate extraction seeds. The [deterministic uniform control](../qwen2_5_vl_7b_mosei_uniform_curve/README.md)

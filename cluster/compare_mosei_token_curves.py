@@ -30,9 +30,14 @@ def verify_match(folder: Path, run: tuple[dict, dict[float, dict], dict],
     if set(rows) != set(div_rows):
         raise ValueError(f"{folder} does not have the same retention ratios")
     for key in ("model_config_sha256", "model_index_sha256", "aligned_csv_sha256",
+                "ground_truth_csv_sha256", "target", "prompt_style", "cache_selection",
                 "protocol", "seeds", "measurement_environment"):
         if config.get(key) != div_config.get(key):
             raise ValueError(f"{folder}: {key} differs from the DivPrune run")
+    f1_key = ("valid_macro_f1_mean" if div_config.get("prompt_style") == "emotion_task"
+              else "valid_macro_f1_at_0.5_mean")
+    if any(f1_key not in row for row in rows.values()):
+        raise ValueError(f"{folder}: missing {f1_key}")
     for ratio in div_rows:
         if costs[ratio]["profiled_sample_ids"] != div_costs[ratio]["profiled_sample_ids"]:
             raise ValueError(f"{folder}: FLOP-profile sample IDs differ at {ratio}")
@@ -62,6 +67,11 @@ def main() -> int:
         parser.error("Supply at least one comparison curve")
 
     div_config, div_rows, div_costs = read_run(args.divprune_dir)
+    single_label_mode = div_config.get("prompt_style") == "emotion_task"
+    f1_key = "valid_macro_f1_mean" if single_label_mode else "valid_macro_f1_at_0.5_mean"
+    sd_key = "valid_macro_f1_sd" if single_label_mode else "valid_macro_f1_at_0.5_sd"
+    if any(f1_key not in row or sd_key not in row for row in div_rows.values()):
+        raise ValueError(f"{args.divprune_dir}: missing expected validation metrics for its target")
     random_runs = [read_run(folder) for folder in (args.random_dirs or [])]
     uniform_run = read_run(args.uniform_dir) if args.uniform_dir else None
     vispruner_run = read_run(args.vispruner_dir) if args.vispruner_dir else None
@@ -103,20 +113,21 @@ def main() -> int:
     for ratio in sorted(div_rows):
         div = div_rows[ratio]
         result = {
+            "target": div_config.get("target"),
             "requested_retention": ratio,
             "actual_retention_valid": div["actual_retention_valid"],
             "mean_retained_visual_tokens_valid": div["mean_retained_visual_tokens_valid"],
             "mean_retained_sequence_tokens_valid": div["mean_retained_sequence_tokens_valid"],
             "divprune_code_revision": div_config.get("code_revision"),
-            "divprune_valid_macro_f1_mean": div["valid_macro_f1_at_0.5_mean"],
-            "divprune_mlp_seed_sd": div["valid_macro_f1_at_0.5_sd"],
+            "divprune_valid_macro_f1_mean": div[f1_key],
+            "divprune_mlp_seed_sd": div[sd_key],
             "divprune_valid_mean_end_to_end_seconds": div["valid_mean_end_to_end_seconds"],
             "divprune_valid_peak_allocated_gib": div["valid_peak_total_allocated_gib_mean"],
             "divprune_valid_theoretical_forward_tflops": div["valid_theoretical_forward_tflops_mean"],
         }
         if random_runs:
             random = [rows[ratio] for _, rows, _ in random_runs]
-            random_f1 = [float(row["valid_macro_f1_at_0.5_mean"]) for row in random]
+            random_f1 = [float(row[f1_key]) for row in random]
             result.update({
                 "random_extraction_seeds": ",".join(str(seed) for seed in random_seeds),
                 "random_code_revisions": ",".join(
@@ -125,10 +136,10 @@ def main() -> int:
                 "random_valid_macro_f1_mean": statistics.mean(random_f1),
                 "random_extraction_seed_sd": statistics.stdev(random_f1) if len(random_f1) > 1 else 0.0,
                 "random_mean_mlp_seed_sd": statistics.mean(
-                    float(row["valid_macro_f1_at_0.5_sd"]) for row in random
+                    float(row[sd_key]) for row in random
                 ),
                 "divprune_minus_random_macro_f1": (
-                    float(div["valid_macro_f1_at_0.5_mean"]) - statistics.mean(random_f1)
+                    float(div[f1_key]) - statistics.mean(random_f1)
                 ),
                 "random_valid_mean_end_to_end_seconds": statistics.mean(
                     float(row["valid_mean_end_to_end_seconds"]) for row in random
@@ -144,11 +155,11 @@ def main() -> int:
             uniform = uniform_run[1][ratio]
             result.update({
                 "uniform_code_revision": uniform_run[0].get("code_revision"),
-                "uniform_valid_macro_f1_mean": uniform["valid_macro_f1_at_0.5_mean"],
-                "uniform_mlp_seed_sd": uniform["valid_macro_f1_at_0.5_sd"],
+                "uniform_valid_macro_f1_mean": uniform[f1_key],
+                "uniform_mlp_seed_sd": uniform[sd_key],
                 "divprune_minus_uniform_macro_f1": (
-                    float(div["valid_macro_f1_at_0.5_mean"])
-                    - float(uniform["valid_macro_f1_at_0.5_mean"])
+                    float(div[f1_key])
+                    - float(uniform[f1_key])
                 ),
                 "uniform_valid_mean_end_to_end_seconds": uniform["valid_mean_end_to_end_seconds"],
                 "uniform_valid_peak_allocated_gib": uniform["valid_peak_total_allocated_gib_mean"],
@@ -156,18 +167,18 @@ def main() -> int:
             })
             if random_runs:
                 result["uniform_minus_random_macro_f1"] = (
-                    float(uniform["valid_macro_f1_at_0.5_mean"]) - statistics.mean(random_f1)
+                    float(uniform[f1_key]) - statistics.mean(random_f1)
                 )
         if vispruner_run:
             vispruner = vispruner_run[1][ratio]
             result.update({
                 "vispruner_code_revision": vispruner_run[0].get("code_revision"),
                 "vispruner_important_ratio": vispruner_run[0]["important_ratio"],
-                "vispruner_valid_macro_f1_mean": vispruner["valid_macro_f1_at_0.5_mean"],
-                "vispruner_mlp_seed_sd": vispruner["valid_macro_f1_at_0.5_sd"],
+                "vispruner_valid_macro_f1_mean": vispruner[f1_key],
+                "vispruner_mlp_seed_sd": vispruner[sd_key],
                 "vispruner_minus_divprune_macro_f1": (
-                    float(vispruner["valid_macro_f1_at_0.5_mean"])
-                    - float(div["valid_macro_f1_at_0.5_mean"])
+                    float(vispruner[f1_key])
+                    - float(div[f1_key])
                 ),
                 "vispruner_valid_mean_end_to_end_seconds": vispruner["valid_mean_end_to_end_seconds"],
                 "vispruner_valid_peak_allocated_gib": vispruner["valid_peak_total_allocated_gib_mean"],
@@ -177,11 +188,11 @@ def main() -> int:
             visionzip = visionzip_run[1][ratio]
             result.update({
                 "visionzip_code_revision": visionzip_run[0].get("code_revision"),
-                "visionzip_valid_macro_f1_mean": visionzip["valid_macro_f1_at_0.5_mean"],
-                "visionzip_mlp_seed_sd": visionzip["valid_macro_f1_at_0.5_sd"],
+                "visionzip_valid_macro_f1_mean": visionzip[f1_key],
+                "visionzip_mlp_seed_sd": visionzip[sd_key],
                 "visionzip_minus_divprune_macro_f1": (
-                    float(visionzip["valid_macro_f1_at_0.5_mean"])
-                    - float(div["valid_macro_f1_at_0.5_mean"])
+                    float(visionzip[f1_key])
+                    - float(div[f1_key])
                 ),
                 "visionzip_valid_mean_end_to_end_seconds": visionzip["valid_mean_end_to_end_seconds"],
                 "visionzip_valid_peak_allocated_gib": visionzip["valid_peak_total_allocated_gib_mean"],
@@ -192,11 +203,11 @@ def main() -> int:
             result.update({
                 "fastv_code_revision": fastv_run[0].get("code_revision"),
                 "fastv_k": fastv_run[0]["fastv_k"],
-                "fastv_valid_macro_f1_mean": fastv["valid_macro_f1_at_0.5_mean"],
-                "fastv_mlp_seed_sd": fastv["valid_macro_f1_at_0.5_sd"],
+                "fastv_valid_macro_f1_mean": fastv[f1_key],
+                "fastv_mlp_seed_sd": fastv[sd_key],
                 "fastv_minus_divprune_macro_f1": (
-                    float(fastv["valid_macro_f1_at_0.5_mean"])
-                    - float(div["valid_macro_f1_at_0.5_mean"])
+                    float(fastv[f1_key])
+                    - float(div[f1_key])
                 ),
                 "fastv_valid_mean_end_to_end_seconds": fastv["valid_mean_end_to_end_seconds"],
                 "fastv_valid_peak_allocated_gib": fastv["valid_peak_total_allocated_gib_mean"],
@@ -206,11 +217,11 @@ def main() -> int:
             sparsevlm = sparsevlm_run[1][ratio]
             result.update({
                 "sparsevlm_code_revision": sparsevlm_run[0].get("code_revision"),
-                "sparsevlm_valid_macro_f1_mean": sparsevlm["valid_macro_f1_at_0.5_mean"],
-                "sparsevlm_mlp_seed_sd": sparsevlm["valid_macro_f1_at_0.5_sd"],
+                "sparsevlm_valid_macro_f1_mean": sparsevlm[f1_key],
+                "sparsevlm_mlp_seed_sd": sparsevlm[sd_key],
                 "sparsevlm_minus_divprune_macro_f1": (
-                    float(sparsevlm["valid_macro_f1_at_0.5_mean"])
-                    - float(div["valid_macro_f1_at_0.5_mean"])
+                    float(sparsevlm[f1_key])
+                    - float(div[f1_key])
                 ),
                 "sparsevlm_valid_mean_end_to_end_seconds": sparsevlm["valid_mean_end_to_end_seconds"],
                 "sparsevlm_valid_peak_allocated_gib": sparsevlm["valid_peak_total_allocated_gib_mean"],

@@ -49,8 +49,8 @@ Then run the resumable validation curve on the GPU node:
 
 Watch `../../results/qwen2_5_vl_7b_mosei_fastv_curve/run.log` with `tail -F`.
 Chunks checkpoint every 25 new clips by default. Validation scores and costs
-are written to `validation_curve.csv` and `validation_curve.png`. Use `--test-all`
-only after the validation curve is finished and the test policy is fixed.
+are written to `validation_curve.csv` and `validation_curve.png`. The same run
+also extracts test embeddings and evaluates each ratio on test.
 
 Compare with DivPrune at matched measured token budgets and profiled IDs:
 

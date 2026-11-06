@@ -58,8 +58,8 @@ python cluster/run_mosei_vispruner_curve.py --root ../..
 Watch `../../results/qwen2_5_vl_7b_mosei_vispruner_curve/run.log` with
 `tail -F`. Each chunk saves embeddings every 25 new clips by default. The
 validation metrics and cost curve appear in `validation_curve.csv` and
-`validation_curve.png`. A separate `--test-all` pass evaluates the predefined
-ratios on held-out test only after the validation curve is complete.
+`validation_curve.png`. The same run extracts test clips and evaluates every
+predefined ratio on test after training the validation-selected MLPs.
 
 To compare against an existing DivPrune curve:
 

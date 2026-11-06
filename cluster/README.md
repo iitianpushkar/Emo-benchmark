@@ -366,6 +366,35 @@ processes. Re-running the same command resumes extraction chunks. See the
 
 ## 4. DivPrune token-retention curve
 
+For a seven-class comparison with the cache-success emotion-prompt baseline,
+pass the same three options to **each** pruning launcher (DivPrune, random,
+uniform, VisPruner, VisionZip, FastV, and SparseVLM):
+
+```bash
+~/hf-env/bin/python -u cluster/run_mosei_divprune_curve.py --root ../.. \
+  --single-label-csv ../../datasets/mosei/csv/mosei_single_label.csv \
+  --prompt-style emotion_task \
+  --decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1 \
+  --chunk-size 500
+```
+
+Replace only the launcher name for another method; the random launcher still
+needs its `--random-seed` for each independent extraction seed. The launchers
+select valid entries from `successful_decodes.csv`, write the exact selected
+labels to `cached_single_label_subset.csv` in each run directory, and print
+train/valid/test counts before GPU work. They train seven-class MLPs and evaluate
+test in the same run, using the baseline's emotion-task prompt. Their default
+result directories end in `_single_label_emotion_prompt_cache_success`, keeping
+these runs separate from the six-label curves. Run `--verify-only` first to
+inspect selection and paths. The full `mosei_single_label.csv` supplies ground
+truth; the older embedded-only CSV is not used.
+Seven-class curves run 5%, 10%, 15%, 20%, 25%, 30%, 50%, 70%, then 90%
+retention in that order. They do not run or plot a 100% condition. The completed
+full baseline can be added to plots later. The pruning `run.log` starts before
+model and MOSEI verification, so it captures verification progress and the
+selected split counts, as in the full baseline.
+The older six-label protocol below still includes its own 100% condition.
+
 The [DivPrune protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_divprune_curve/README.md)
 uses the same checkpoint, MOSEI splits, frame settings, and classifier family.
 It sweeps 100% through 5% of projected video tokens with three matched MLP
@@ -377,7 +406,10 @@ python cluster/run_mosei_divprune_curve.py --root ../.. --verify-only
 python cluster/run_mosei_divprune_curve.py --root ../..
 ```
 
-The sweep prints each retention ratio and split as well as per-chunk extraction
+The sweep decodes and preprocesses each clip once per pruning method, then runs
+all requested retention ratios on that clip before moving to the next. Each
+ratio still gets its own embedding chunk and cost report. The sweep prints each
+retention ratio and split as well as per-chunk extraction
 and MLP training progress to stdout and appends it to
 `../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. Follow it with
 `tail -F ../../results/qwen2_5_vl_7b_mosei_divprune_curve/run.log`. It uses
@@ -410,14 +442,12 @@ python cluster/run_mosei_random_curve.py --root ../.. --random-seed 44
 
 Each seed writes to its own `../../results/qwen2_5_vl_7b_mosei_random_curve_seedN/`
 directory and appends live output to `run.log`. Use the comparison command in
-the random-token protocol after the DivPrune and random validation curves
-finish. Like DivPrune, test evaluation is a separate `--test-all` pass.
-
-After inspecting the full validation curve and fixing the selection rule, run
-`python cluster/run_mosei_divprune_curve.py --root ../.. --test-all` to score all
-predeclared ratios on test. The curve is computationally large: each ratio
-extracts train and validation clips separately, with test clips added by
-`--test-all`. It resumes verified chunks after an interrupted job.
+the random-token protocol after the curves finish. Every pruning launcher
+extracts train, validation, and test clips and evaluates every ratio on test in
+one invocation. The curve resumes verified chunks after an interrupted job. For cost
+comparison, each ratio's end-to-end clip latency includes the shared decode and
+preprocessing time plus its own forward pass; summing those ratio latencies
+would count the shared work repeatedly.
 
 All MOSEI experiment launchers record measured per-clip token counts, synchronized extraction
 latency, and process GPU allocation. They estimate theoretical forward-pass
@@ -441,10 +471,10 @@ has finished:
 ```
 
 For any of the seven pruning curve roots, replace `--source-dir` with that
-curve's result directory. The first invocation trains three seeds on train
-and validation embeddings. After the single-label validation results and
-test policy are fixed and the curve's test embeddings exist, repeat with
-`--test-all` for held-out evaluation. Results go under `single_label/` inside
+curve's result directory. This separate posthoc evaluator trains three seeds
+on train and validation embeddings; pass its own `--test-all` to add test scores
+when test embeddings exist. The seven-class pruning launchers already evaluate
+test in their main run. Results go under `single_label/` inside
 the source directory. The label rule is maximum positive emotion score;
 tied positive maxima are excluded and all-zero clips are neutral. The output
 records tie exclusions, per-split coverage, accuracy, macro/weighted F1, per-class scores,

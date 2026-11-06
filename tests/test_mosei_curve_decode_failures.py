@@ -85,6 +85,41 @@ class DecodeFailureRecordsTest(unittest.TestCase):
             self.assertFalse(test_metrics_match(test_path, {"indexed": 2, "embedded": 2,
                                                         "missing": 0}))
 
+    def test_seven_class_metrics_require_matching_task_and_cache_subset_coverage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            mlp = root / "mlp"
+            mlp.mkdir()
+            (mlp / "best_mlp.pt").touch()
+            (mlp / "validation_predictions.csv").touch()
+            coverage = {"train": {"indexed": 3, "embedded": 3, "missing": 0},
+                        "valid": {"indexed": 2, "embedded": 2, "missing": 0},
+                        "test": {"indexed": 2, "embedded": 2, "missing": 0}}
+            report = {"task": "single_max_seven_class",
+                      "coverage": {"train": {"indexed": 3, "embedded": 3,
+                                              "missing_decoder": 0},
+                                   "validation": {"indexed": 2, "embedded": 2,
+                                                  "missing_decoder": 0}},
+                      "validation": {"sample_count": 2}}
+            metrics_path = mlp / "metrics.json"
+            metrics_path.write_text(json.dumps(report))
+            self.assertTrue(training_metrics_match(metrics_path, coverage, True))
+            self.assertFalse(training_metrics_match(metrics_path, coverage, False))
+            report["coverage"]["validation"]["embedded"] = 1
+            metrics_path.write_text(json.dumps(report))
+            self.assertFalse(training_metrics_match(metrics_path, coverage, True))
+
+            evaluation = root / "test"
+            evaluation.mkdir()
+            (evaluation / "predictions.csv").touch()
+            test_path = evaluation / "metrics.json"
+            test_path.write_text(json.dumps({"task": "single_max_seven_class",
+                                             "coverage": {"indexed": 2, "embedded": 2,
+                                                          "missing_decoder": 0},
+                                             "metrics": {"sample_count": 2}}))
+            self.assertTrue(test_metrics_match(test_path, coverage["test"], True))
+            self.assertFalse(test_metrics_match(test_path, coverage["test"], False))
+
 
 if __name__ == "__main__":
     unittest.main()

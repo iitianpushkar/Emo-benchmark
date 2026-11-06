@@ -62,9 +62,8 @@ python cluster/extract_mosei_qwen2_5vl.py \
 ```
 
 The index must already exist from the baseline or DivPrune preparation.
-After the validation comparison and test policy are fixed, add `--test-all`
-to score every predeclared retention ratio on held-out test. Do not choose a
-ratio using test results.
+The same run scores every predeclared retention ratio on test after selecting
+MLP checkpoints on validation. Do not choose a ratio using test results.
 
 Compare the three methods only at matched measured token budgets and
 profiled sample IDs:
