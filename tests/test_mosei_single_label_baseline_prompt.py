@@ -21,6 +21,9 @@ class SingleLabelBaselinePromptTests(unittest.TestCase):
         self.assertIn("Utterance: A sample utterance", prompt)
         self.assertEqual(make_mosei_prompt("A sample utterance", "utterance_only"),
                          "A sample utterance")
+        multi = make_mosei_prompt("A sample utterance", "emotion_multilabel_task")
+        self.assertIn("More than one emotion may be present", multi)
+        self.assertNotIn("exactly one", multi)
 
     def test_prompted_chunk_cannot_reuse_old_prompt(self):
         protocol = {"fps": 6}

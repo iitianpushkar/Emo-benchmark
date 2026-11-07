@@ -23,7 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.live_log import activate_live_log  # noqa: E402
-from cluster.mosei_cache_subset import cached_single_label_rows, resolve_cache_frames, write_subset  # noqa: E402
+from cluster.mosei_cache_subset import (cached_multilabel_rows, cached_single_label_rows,
+                                         resolve_cache_frames, write_subset)  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.resume_config import record_resume_config  # noqa: E402
@@ -33,6 +34,9 @@ from scripts.data.prepare_mosei import EMOTIONS, SINGLE_LABELS, single_label  # 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
 HIDDEN_SIZE = 3584
+PROMPT_VERSIONS = {"utterance_only": "utterance_only",
+                   "emotion_task": "mosei_seven_class_emotion_task_v1",
+                   "emotion_multilabel_task": "mosei_six_binary_emotion_task_v1"}
 
 
 def sha256(path: Path) -> str:
@@ -145,8 +149,7 @@ def complete_baseline_chunk(payload: dict, expected_ids: list[str], model_dir: P
         and config.get("retain_ratio") == 1.0
         and config.get("pruning") == "none"
         and config.get("profile_stride") == profile_stride
-        and config.get("prompt_style", "utterance_only") == (
-            "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else "utterance_only")
+        and config.get("prompt_style", "utterance_only") == PROMPT_VERSIONS[prompt_style]
         and len(payload.get("metadata", [])) == len(expected_ids)
     )
 
@@ -179,8 +182,7 @@ def verified_decode_errors(payload: dict, expected_ids: list[str], model_dir: Pa
             or config.get("pruning") != "none"
             or config.get("retain_ratio") != 1.0
             or config.get("profile_stride") != profile_stride
-            or config.get("prompt_style", "utterance_only") != (
-                "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else "utterance_only")
+            or config.get("prompt_style", "utterance_only") != PROMPT_VERSIONS[prompt_style]
             or any(not str(error.get("error", "")).startswith(
                 ("TimeoutError: Decord exceeded", "RuntimeError: Video decoding failed"))
                 for error in errors)):
@@ -233,7 +235,7 @@ def main() -> int:
                         help="Read predecoded frames only; cache misses become recorded decode failures")
     parser.add_argument("--single-label-csv", type=Path,
                         help="Seven-class MOSEI ground-truth CSV; with a decoded cache, select only cached clips")
-    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+    parser.add_argument("--prompt-style", choices=tuple(PROMPT_VERSIONS),
                         default="utterance_only")
     parser.add_argument("--output-dir", type=Path, help="Run artifacts (default: ROOT/results/qwen2_5_vl_7b_mosei)")
     parser.add_argument("--chunk-size", type=int, default=500)
@@ -257,8 +259,10 @@ def main() -> int:
     single_label_mode = args.single_label_csv is not None
     if single_label_mode and args.prompt_style != "emotion_task":
         parser.error("--single-label-csv requires --prompt-style emotion_task")
-    if not single_label_mode and args.prompt_style != "utterance_only":
-        parser.error("--prompt-style emotion_task requires --single-label-csv")
+    if not single_label_mode and args.prompt_style == "emotion_task":
+        parser.error("--prompt-style emotion_task requires --single-label-csv; use emotion_multilabel_task for six emotions")
+    if single_label_mode and args.prompt_style == "emotion_multilabel_task":
+        parser.error("--prompt-style emotion_multilabel_task is for the six-label task")
     ground_truth_csv = (args.single_label_csv or mosei_root / "csv" / "mosei_aligned.csv").expanduser().resolve()
     if not ground_truth_csv.is_file():
         raise FileNotFoundError(ground_truth_csv)
@@ -266,7 +270,9 @@ def main() -> int:
         single_label_counts(ground_truth_csv)
     default_run_name = (("qwen2_5_vl_7b_mosei_single_label_emotion_prompt_cache_success"
                          if args.decoded_cache_dir else "qwen2_5_vl_7b_mosei_single_label_emotion_prompt") if single_label_mode
-                        else "qwen2_5_vl_7b_mosei")
+                        else ("qwen2_5_vl_7b_mosei_multilabel_emotion_prompt_cache_success"
+                              if args.decoded_cache_dir else "qwen2_5_vl_7b_mosei_multilabel_emotion_prompt")
+                        if args.prompt_style == "emotion_multilabel_task" else "qwen2_5_vl_7b_mosei")
     output_dir = (args.output_dir or root / "results" / default_run_name).expanduser().resolve()
     try:
         decoded_cache_dir = resolve_cache_frames(args.decoded_cache_dir) if args.decoded_cache_dir else None
@@ -283,13 +289,14 @@ def main() -> int:
     annotation_csv = ground_truth_csv
     cache_selection = None
     subset_fields = subset_rows = None
-    if single_label_mode and decoded_cache_dir:
-        subset_fields, subset_rows, cache_selection = cached_single_label_rows(
-            ground_truth_csv, decoded_cache_dir,
-            mosei_root / "Raw", video_protocol)
+    if decoded_cache_dir:
+        selector = cached_single_label_rows if single_label_mode else cached_multilabel_rows
+        subset_fields, subset_rows, cache_selection = selector(
+            ground_truth_csv, decoded_cache_dir, mosei_root / "Raw", video_protocol)
         split_counts = cache_selection["selected"]
-        annotation_csv = output_dir / "cached_single_label_subset.csv"
-        print(f"Cache-success single-label selection: {json.dumps(cache_selection)}", flush=True)
+        annotation_csv = output_dir / ("cached_single_label_subset.csv" if single_label_mode
+                                       else "cached_multilabel_subset.csv")
+        print(f"Cache-success selection: {json.dumps(cache_selection)}", flush=True)
     else:
         split_counts = single_label_counts(ground_truth_csv) if single_label_mode else SPLIT_COUNTS
     if args.verify_only:

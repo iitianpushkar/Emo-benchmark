@@ -1,4 +1,4 @@
-"""Select single-label MOSEI clips with valid predecoded frame cache entries."""
+"""Select labeled MOSEI clips with valid predecoded frame cache entries."""
 
 from __future__ import annotations
 
@@ -21,8 +21,10 @@ def resolve_cache_frames(path: Path) -> Path:
     raise ValueError(f"Expected a decoded cache root or its frames directory: {path}")
 
 
-def cached_single_label_rows(single_label_csv: Path, cache_dir: Path,
-                             raw_dir: Path, protocol: dict) -> tuple[list[str], list[dict], dict]:
+def cached_label_rows(label_csv: Path, cache_dir: Path, raw_dir: Path,
+                      protocol: dict, target_mode: str) -> tuple[list[str], list[dict], dict]:
+    if target_mode not in {"single_label", "multilabel"}:
+        raise ValueError(f"Unknown target mode: {target_mode}")
     started = time.monotonic()
     manifest = cache_dir.parent / "successful_decodes.csv"
     if not manifest.is_file():
@@ -45,20 +47,32 @@ def cached_single_label_rows(single_label_csv: Path, cache_dir: Path,
     counts = Counter()
     seen = set()
     selected = []
-    with single_label_csv.open(newline="", encoding="utf-8") as handle:
+    with label_csv.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        required = {"sample_id", "split", "video_id", "clip_id", "emotion", "emotion_id", "label_status"}
+        required = {"sample_id", "split", "video_id", "clip_id"}
+        if target_mode == "single_label":
+            required |= {"emotion", "emotion_id", "label_status"}
+        else:
+            required |= {name for name in
+                         ("happy", "sad", "anger", "surprise", "disgust", "fear")}
         if not required <= set(reader.fieldnames or ()):
-            raise ValueError(f"{single_label_csv}: missing {sorted(required - set(reader.fieldnames or ()))}")
+            raise ValueError(f"{label_csv}: missing {sorted(required - set(reader.fieldnames or ()))}")
         fields = list(reader.fieldnames or ())
         for checked, row in enumerate(reader, start=1):
             sample_id, split = row["sample_id"], row["split"]
             if sample_id in seen or split not in SPLITS:
-                raise ValueError(f"{single_label_csv}: duplicate ID or invalid split: {sample_id}, {split}")
+                raise ValueError(f"{label_csv}: duplicate ID or invalid split: {sample_id}, {split}")
             seen.add(sample_id)
-            counts["single_label_rows"] += 1
-            if row["label_status"] not in {"unique_max", "all_zero"}:
-                raise ValueError(f"{single_label_csv}: invalid label status for {sample_id}")
+            counts["label_rows"] += 1
+            if target_mode == "single_label":
+                if row["label_status"] not in {"unique_max", "all_zero"}:
+                    raise ValueError(f"{label_csv}: invalid label status for {sample_id}")
+            else:
+                try:
+                    for name in ("happy", "sad", "anger", "surprise", "disgust", "fear"):
+                        float(row[name])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{label_csv}: invalid emotion score for {sample_id}") from exc
             success = successful.get(sample_id)
             if success is None:
                 if checked % 500 == 0:
@@ -83,14 +97,24 @@ def cached_single_label_rows(single_label_csv: Path, cache_dir: Path,
                       f"{time.monotonic() - started:.1f}s elapsed", flush=True)
 
     if any(counts[split] == 0 for split in SPLITS):
-        raise ValueError("Cache and single-label CSV must overlap in every split")
+        raise ValueError("Cache and label CSV must overlap in every split")
     summary = {"successful_decodes": len(successful),
-               "single_label_rows": counts["single_label_rows"],
+               ("single_label_rows" if target_mode == "single_label" else "multilabel_rows"): counts["label_rows"],
                "selected": {split: counts[split] for split in SPLITS},
                "stale_success_entries": counts["stale_success_entries"]}
-    print(f"Cache selection complete: {counts['single_label_rows']} labels checked; "
+    print(f"Cache selection complete: {counts['label_rows']} labels checked; "
           f"{len(selected)} selected in {time.monotonic() - started:.1f}s", flush=True)
     return fields, selected, summary
+
+
+def cached_single_label_rows(single_label_csv: Path, cache_dir: Path,
+                             raw_dir: Path, protocol: dict) -> tuple[list[str], list[dict], dict]:
+    return cached_label_rows(single_label_csv, cache_dir, raw_dir, protocol, "single_label")
+
+
+def cached_multilabel_rows(aligned_csv: Path, cache_dir: Path,
+                           raw_dir: Path, protocol: dict) -> tuple[list[str], list[dict], dict]:
+    return cached_label_rows(aligned_csv, cache_dir, raw_dir, protocol, "multilabel")
 
 
 def write_subset(path: Path, fields: list[str], rows: list[dict]) -> None:

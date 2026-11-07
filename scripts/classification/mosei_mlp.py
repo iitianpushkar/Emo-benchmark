@@ -74,20 +74,32 @@ def select_thresholds(y: np.ndarray, prob: np.ndarray) -> np.ndarray:
 
 def metrics(y: np.ndarray, prob: np.ndarray, thresholds: np.ndarray) -> dict:
     pred = (prob >= thresholds).astype(np.int64)
+    per_label = {}
+    for j, name in enumerate(EMOTIONS):
+        positive = y[:, j] == 1
+        negative = ~positive
+        weighted_accuracy = (
+            float(((pred[:, j] == 1) & positive).sum() / positive.sum()
+                  + ((pred[:, j] == 0) & negative).sum() / negative.sum()) / 2
+            if positive.any() and negative.any() else None
+        )
+        per_label[name] = {
+            "support": int(positive.sum()),
+            "threshold": float(thresholds[j]),
+            "weighted_accuracy": weighted_accuracy,
+            "f1": float(f1_score(y[:, j], pred[:, j], zero_division=0)),
+            "roc_auc": float(roc_auc_score(y[:, j], prob[:, j])) if positive.any() and negative.any() else None,
+        }
+    defined_weighted_accuracies = [value["weighted_accuracy"] for value in per_label.values()
+                                   if value["weighted_accuracy"] is not None]
     return {
         "sample_count": len(y),
         "macro_f1": float(f1_score(y, pred, average="macro", zero_division=0)),
         "micro_f1": float(f1_score(y, pred, average="micro", zero_division=0)),
         "subset_accuracy": float(accuracy_score(y, pred)),
-        "per_label": {
-            name: {
-                "support": int(y[:, j].sum()),
-                "threshold": float(thresholds[j]),
-                "f1": float(f1_score(y[:, j], pred[:, j], zero_division=0)),
-                "roc_auc": float(roc_auc_score(y[:, j], prob[:, j])) if len(np.unique(y[:, j])) == 2 else None,
-            }
-            for j, name in enumerate(EMOTIONS)
-        },
+        "mean_weighted_accuracy": (float(np.mean(defined_weighted_accuracies))
+                                   if defined_weighted_accuracies else None),
+        "per_label": per_label,
     }
 
 
@@ -149,7 +161,12 @@ def train(args: argparse.Namespace) -> None:
     thresholds = select_thresholds(valid_y.numpy(), valid_prob)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": best_state, "mean": mean, "std": std, "thresholds": thresholds.tolist(), "input_dim": train_x.shape[1], "hidden_dim": args.hidden_dim, "dropout": args.dropout, "best_epoch": best_epoch, "labels": list(EMOTIONS)}, args.output_dir / "best_mlp.pt")
-    report = {"best_epoch": best_epoch, "checkpoint_macro_f1_at_0.5": float(best_f1), "coverage": {"train": train_coverage, "validation": valid_coverage}, "validation": metrics(valid_y.numpy(), valid_prob, thresholds)}
+    report = {"best_epoch": best_epoch, "checkpoint_macro_f1_at_0.5": float(best_f1),
+              "threshold_selection": "per-emotion validation F1", "weighted_accuracy_definition":
+              "mean of positive recall and negative recall per emotion",
+              "coverage": {"train": train_coverage, "validation": valid_coverage},
+              "validation": metrics(valid_y.numpy(), valid_prob, thresholds),
+              "validation_fixed_0_5": metrics(valid_y.numpy(), valid_prob, np.full(6, 0.5))}
     save_predictions(args.output_dir / "validation_predictions.csv", valid_ids, valid_y.numpy(), valid_prob, thresholds)
     if args.test_pt:
         test_x, test_y, test_ids, test_coverage = load_split(args.test_pt, args.test_index)
@@ -158,6 +175,7 @@ def train(args: argparse.Namespace) -> None:
         test_prob = predict(model, (test_x - mean) / std, device, args.batch_size)
         report["coverage"]["test"] = test_coverage
         report["test"] = metrics(test_y.numpy(), test_prob, thresholds)
+        report["test_fixed_0_5"] = metrics(test_y.numpy(), test_prob, np.full(6, 0.5))
         save_predictions(args.output_dir / "test_predictions.csv", test_ids, test_y.numpy(), test_prob, thresholds)
     (args.output_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 

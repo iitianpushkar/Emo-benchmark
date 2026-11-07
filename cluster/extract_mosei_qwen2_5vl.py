@@ -54,7 +54,7 @@ def main():
     parser.add_argument("--index-csv", type=Path, required=True)
     parser.add_argument("--decoded-cache-dir", type=Path,
                         help="Use only predecoded sampled frames from this cache directory")
-    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task", "emotion_multilabel_task"),
                         default="utterance_only")
     parser.add_argument("--output-pt", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
@@ -119,6 +119,8 @@ def main():
               "retain_ratio": args.retain_ratio, "profile_stride": args.profile_stride}
     if args.prompt_style == "emotion_task":
         config["prompt_style"] = "mosei_seven_class_emotion_task_v1"
+    elif args.prompt_style == "emotion_multilabel_task":
+        config["prompt_style"] = "mosei_six_binary_emotion_task_v1"
     if args.pruning == "random":
         config["random_seed"] = args.random_seed
     if args.pruning == "vispruner":

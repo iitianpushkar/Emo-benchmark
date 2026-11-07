@@ -7,11 +7,49 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cluster.mosei_cache_subset import cached_single_label_rows, resolve_cache_frames, write_subset
+from cluster.mosei_cache_subset import (cached_multilabel_rows, cached_single_label_rows,
+                                         resolve_cache_frames, write_subset)
 from cluster.mosei_decoded_cache import cache_paths, identity
 
 
 class CacheSubsetTests(unittest.TestCase):
+    def test_multilabel_cache_uses_successful_decodes_from_original_scores(self):
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "cluster.mosei_decoded_cache.qwen_utils_version", return_value="test"
+        ):
+            root = Path(folder)
+            cache_dir, raw_dir = root / "cache" / "frames", root / "Raw"
+            source = root / "aligned.csv"
+            protocol = {"fps": 6, "min_frames": 4, "max_frames": 64, "frame_size": 224}
+            emotions = ("happy", "sad", "anger", "surprise", "disgust", "fear")
+            manifest_rows = []
+            with source.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["sample_id", "split", "video_id", "clip_id", *emotions])
+                writer.writeheader()
+                for split, video_id, cached in (("train", "a", True), ("train", "b", False),
+                                                 ("valid", "c", True), ("test", "d", True)):
+                    sample_id = f"{video_id}[0]"
+                    writer.writerow({"sample_id": sample_id, "split": split, "video_id": video_id,
+                                     "clip_id": 0, **{name: "1" if name == "happy" else "0" for name in emotions}})
+                    path = raw_dir / video_id / "0.mp4"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"video")
+                    if cached:
+                        data_path, metadata_path = cache_paths(cache_dir, sample_id)
+                        data_path.parent.mkdir(parents=True, exist_ok=True)
+                        data_path.write_bytes(b"cached")
+                        metadata_path.write_text(json.dumps(identity(sample_id, path, protocol)))
+                        manifest_rows.append({"split": split, "sample_id": sample_id,
+                                              "cache_path": str(data_path)})
+            manifest = cache_dir.parent / "successful_decodes.csv"
+            with manifest.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["split", "sample_id", "cache_path"])
+                writer.writeheader()
+                writer.writerows(manifest_rows)
+            _, selected, summary = cached_multilabel_rows(source, cache_dir, raw_dir, protocol)
+            self.assertEqual(summary["selected"], {"train": 1, "valid": 1, "test": 1})
+            self.assertEqual([row["sample_id"] for row in selected], ["a[0]", "c[0]", "d[0]"])
+
     def test_only_valid_cached_single_label_clips_are_selected(self):
         with tempfile.TemporaryDirectory() as folder, patch(
             "cluster.mosei_decoded_cache.qwen_utils_version", return_value="test"

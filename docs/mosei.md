@@ -70,6 +70,35 @@ comparison, use `python -m scripts mosei_mlp evaluate --checkpoint ...
 --embeddings-pt ... --index ... --output-dir ...`; this does not retrain or
 retune thresholds.
 
+## Cluster Qwen2.5-VL-7B multi-label emotion-prompt baseline
+
+From `cvpr/codes/Emo-benchmark` on a GPU compute node, use the decoded-frame
+cache produced by `cluster/predecode_mosei.py`:
+
+```bash
+~/hf-env/bin/python -u cluster/run_mosei_qwen2_5vl7b_baseline.py \
+  --root ../.. \
+  --decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1 \
+  --prompt-style emotion_multilabel_task \
+  --chunk-size 500
+```
+
+The default output is
+`../../results/qwen2_5_vl_7b_mosei_multilabel_emotion_prompt_cache_success/`.
+The runner selects the intersection of the original six-score MOSEI CSV and
+verified successful cache entries. Extraction reads only those saved frames;
+it does not invoke Decord for a cache miss. Chunks checkpoint every 25 clips
+and resume on rerun. The same command continues through merging and MLP
+training after extraction. Progress appears in the job output and `run.log`.
+
+`outputs/metrics.json` reports per-emotion and mean weighted accuracy, where
+each emotion's weighted accuracy is the mean of positive and negative recall.
+It also reports macro F1, micro F1, exact-match accuracy, and the same metrics
+at a fixed 0.5 threshold. The primary predictions use per-emotion thresholds
+chosen on validation F1; `outputs/test_predictions.csv` records the six true
+labels, probabilities, and chosen-threshold predictions for every embedded test
+clip. `summary.json` records coverage and extraction cost.
+
 ## Current execution status
 
 The full transcript-only baseline has completed on the dataset host; see
