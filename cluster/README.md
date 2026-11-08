@@ -39,6 +39,26 @@ baseline output is
 outputs follow
 `../../results/qwen2_5_vl_7b_meld_<method>_curve_emotion_prompt_cache_success/`.
 
+To inspect the 100% full baseline's decoder attention for **one** MELD clip,
+choose a `sample_id` from the baseline's `indexes/meld_test_index.csv` (or the
+predecode job's `indexes/meld_test_index.csv` before the baseline has run) and
+run:
+
+```bash
+~/hf-env/bin/python -u cluster/visualize_meld_full_attention.py --root ../.. \
+  --split test --sample-id 'test_dia123_utt4' --verify-only
+~/hf-env/bin/python -u cluster/visualize_meld_full_attention.py --root ../.. \
+  --split test --sample-id 'test_dia123_utt4'
+```
+
+Replace the example ID with an ID in that test index. Use `--split train` or
+`--split dev` for those indexes, or pass `--index-csv` explicitly.
+The output is under the baseline's `attention_heatmaps/<sample_id>/` folder:
+`layer_overlays/layer_00.png` through the final decoder layer each show **all
+cached frames** with that layer's final prompt-token attention overlaid.
+The script also saves raw scores and layer summaries. Qwen's temporal patching
+can assign the same decoder-level map to two adjacent frames.
+
 ## MELD face-only Qwen2.5-VL-3B experiment
 
 The cluster version of the two Kaggle face-token notebooks is
@@ -433,6 +453,23 @@ full baseline can be added to plots later. The pruning `run.log` starts before
 model and MOSEI verification, so it captures verification progress and the
 selected split counts, as in the full baseline.
 The older six-label protocol below still includes its own 100% condition.
+
+To inspect one cached MOSEI clip with **all frames overlaid at every decoder
+layer** for the full 7B baseline, choose its ID from the selected baseline
+`indexes/mosei_test_index.csv` (or the predecode index) and run:
+
+```bash
+~/hf-env/bin/python -u cluster/visualize_mosei_full_attention.py --root ../.. \
+  --split test --sample-id 'YOUR_MOSEI_SAMPLE_ID'
+```
+
+This defaults to the six-label `emotion_multilabel_task` baseline. For the
+seven-class baseline, add `--prompt-style emotion_task`. The output appears
+under the matching baseline result directory in
+`attention_heatmaps/<sample_id>/layer_overlays/layer_00.png` and one PNG for
+each remaining decoder layer. Use `--verify-only` to check the selected clip,
+cache, prompt, and model before GPU work. A temporal patch can cover two frames,
+so adjacent frames may display the same decoder-level map.
 
 For the six-label multilabel experiment with the same cached frames and
 emotion-aware prompt as its full baseline, use the full `mosei_aligned.csv`
