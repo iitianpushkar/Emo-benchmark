@@ -17,19 +17,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from cluster.live_log import activate_live_log  # noqa: E402
-from cluster.mosei_cache_subset import cached_single_label_rows, resolve_cache_frames, write_subset  # noqa: E402
+from cluster.mosei_cache_subset import (cached_multilabel_rows, cached_single_label_rows,
+                                        resolve_cache_frames, write_subset)  # noqa: E402
 from cluster.preflight import verify_model, verify_mosei  # noqa: E402
 from cluster.qwen_cost import FLOP_PROFILE_TARGET, summarize_embedding_cost  # noqa: E402
 from cluster.resume_config import record_resume_config  # noqa: E402
 from cluster.verify_qwen_environment import require_cuda_gpu, verify_qwen_environment  # noqa: E402
 from cluster.run_mosei_qwen2_5vl7b_baseline import (  # noqa: E402
-    HIDDEN_SIZE, MODEL_ID, SPLIT_COUNTS, git_revision, index_ids, single_label_counts,
+    HIDDEN_SIZE, MODEL_ID, PROMPT_VERSIONS, SPLIT_COUNTS, git_revision, index_ids, single_label_counts,
     run, sha256, verify_available_embeddings,
 )
 
-DEFAULT_RATIOS = (1.0, .9, .8, .7, .6, .5, .4, .3, .25, .2, .15, .1, .05)
-SEVEN_CLASS_RATIOS = (.05, .1, .15, .2, .25, .3, .5, .7, .9)
+DEFAULT_RATIOS = (1.0, .8, .7, .6, .5, .4, .3, .2, .15, .1, .05)
+SEVEN_CLASS_RATIOS = (.05, .1, .15, .2, .3, .5, .7)
 DEFAULT_SEEDS = (42, 43, 44)
+CURVE_PROMPT_VERSIONS = {**PROMPT_VERSIONS,
+                         "meld_emotion_task": "meld_seven_class_emotion_task_v1"}
 
 
 def ratio_name(ratio: float) -> str:
@@ -40,16 +43,18 @@ def ratio_name(ratio: float) -> str:
 
 
 def curve_ratios(requested: list[float] | None,
-                 single_label_mode: bool) -> tuple[list[float], list[str]]:
+                 single_label_mode: bool,
+                 emotion_multilabel_mode: bool = False) -> tuple[list[float], list[str]]:
+    baseline_reference_mode = single_label_mode or emotion_multilabel_mode
     ratios = list(requested if requested is not None else
-                  SEVEN_CLASS_RATIOS if single_label_mode else DEFAULT_RATIOS)
+                  SEVEN_CLASS_RATIOS if baseline_reference_mode else DEFAULT_RATIOS)
     names = [ratio_name(ratio) for ratio in ratios]
     if len(names) != len(set(names)):
         raise ValueError("Ratios must be unique")
-    if single_label_mode and "r100" in names:
-        raise ValueError("Seven-class curves reserve 100% for the full baseline; omit 1.0")
-    if not single_label_mode and "r100" not in names:
-        raise ValueError("Six-label curves must include 1.0 for their full baseline")
+    if baseline_reference_mode and "r100" in names:
+        raise ValueError("Emotion-prompt curves reserve 100% for the full baseline; omit 1.0")
+    if not baseline_reference_mode and "r100" not in names:
+        raise ValueError("Utterance-only curves must include 1.0 for their full baseline")
     return ratios, names
 
 
@@ -95,7 +100,7 @@ def complete_chunk(path: Path, ids: list[str], model_dir: Path, start: int,
         and config.get("profile_stride") == profile_stride
         and config.get("video_protocol") == protocol
         and config.get("prompt_style") == (
-            "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else None)
+            CURVE_PROMPT_VERSIONS[prompt_style] if prompt_style != "utterance_only" else None)
         and len(payload.get("metadata", [])) == len(ids)
         and (method != "random" or all(
             item.get("random_prune_sample_seed") == sample_seed(random_seed, sample_id)
@@ -127,7 +132,7 @@ def decode_failure_records(payload: dict, expected_ids: list[str], model_dir: Pa
             or config.get("start") != start or config.get("limit") != len(expected_ids)
             or config.get("video_protocol") != protocol
             or config.get("prompt_style") != (
-                "mosei_seven_class_emotion_task_v1" if prompt_style == "emotion_task" else None)
+                CURVE_PROMPT_VERSIONS[prompt_style] if prompt_style != "utterance_only" else None)
             or config.get("retain_ratio") != ratio
             or config.get("pruning") != expected_pruning
             or config.get("profile_stride") != profile_stride
@@ -217,6 +222,8 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
             tuned_f1 = [float(report["validation"]["macro_f1"]) for report in reports]
             validation_accuracy = [float(report["validation"]["subset_accuracy"]) for report in reports]
             validation_micro_f1 = [float(report["validation"]["micro_f1"]) for report in reports]
+            validation_weighted_accuracy = [report["validation"].get("mean_weighted_accuracy")
+                                            for report in reports]
         row = {
             "method": method,
             "extraction_seed": random_seed,
@@ -260,12 +267,17 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
                         "valid_tuned_macro_f1_sd": statistics.stdev(tuned_f1) if len(tuned_f1) > 1 else 0.0,
                         "valid_subset_accuracy_mean": statistics.mean(validation_accuracy),
                         "valid_micro_f1_mean": statistics.mean(validation_micro_f1)})
+            defined_weighted = [float(value) for value in validation_weighted_accuracy
+                                if value is not None]
+            row["valid_mean_weighted_accuracy_mean"] = (statistics.mean(defined_weighted)
+                                                          if defined_weighted else None)
         test_reports = [folder / "test_eval" / f"seed_{seed}" / "metrics.json" for seed in seeds]
         if "test" in coverage and all(path.is_file() for path in test_reports):
             row["test_indexed"] = coverage["test"]["indexed"]
             row["test_embedded"] = coverage["test"]["embedded"]
             row["test_missing"] = coverage["test"]["missing"]
-            test_metrics = [json.loads(path.read_text())["metrics"] for path in test_reports]
+            test_payloads = [json.loads(path.read_text()) for path in test_reports]
+            test_metrics = [payload["metrics"] for payload in test_payloads]
             values = [float(metric["macro_f1"]) for metric in test_metrics]
             row["test_macro_f1_mean"] = statistics.mean(values)
             row["test_macro_f1_sd"] = statistics.stdev(values) if len(values) > 1 else 0.0
@@ -276,12 +288,19 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
                 row["test_micro_f1_mean"] = statistics.mean(float(metric["micro_f1"]) for metric in test_metrics)
                 row["test_subset_accuracy_mean"] = statistics.mean(
                     float(metric["subset_accuracy"]) for metric in test_metrics)
+                weighted = [float(metric["mean_weighted_accuracy"]) for metric in test_metrics
+                            if metric.get("mean_weighted_accuracy") is not None]
+                row["test_mean_weighted_accuracy_mean"] = (statistics.mean(weighted)
+                                                             if weighted else None)
+                if all("metrics_fixed_0_5" in payload for payload in test_payloads):
+                    fixed_metrics = [payload["metrics_fixed_0_5"] for payload in test_payloads]
+                    row["test_macro_f1_at_0.5_mean"] = statistics.mean(
+                        float(metric["macro_f1"]) for metric in fixed_metrics)
         rows.append(row)
     rows.sort(key=lambda row: row["requested_retention"])
     f1_key = "valid_macro_f1_mean" if single_label_mode else "valid_macro_f1_at_0.5_mean"
     sd_key = "valid_macro_f1_sd" if single_label_mode else "valid_macro_f1_at_0.5_sd"
-    baseline = None if single_label_mode else next(
-        row[f1_key] for row in rows if row["requested_retention"] == 1)
+    baseline = next((row[f1_key] for row in rows if row["requested_retention"] == 1), None)
     if baseline is not None:
         for row in rows:
             row["delta_valid_macro_f1_at_0.5"] = row[f1_key] - baseline
@@ -324,7 +343,34 @@ def write_curve(root: Path, names: list[str], seeds: tuple[int, ...],
     figure.tight_layout()
     figure.savefig(root / "validation_curve.png", dpi=180)
     plt.close(figure)
-    print(f"Wrote {root / 'validation_curve.csv'} and validation_curve.png", flush=True)
+    if all("test_macro_f1_mean" in row for row in rows):
+        figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+        test_x = [row["requested_retention"] * 100 for row in rows]
+        axes[0, 0].errorbar(test_x, [row["test_macro_f1_mean"] for row in rows],
+                            yerr=[row["test_macro_f1_sd"] for row in rows],
+                            marker="o", capsize=3)
+        axes[0, 0].set(ylabel="Test macro F1", title="Mean ± SD across MLP seeds")
+        if single_label_mode:
+            panels = ((axes[0, 1], "test_accuracy_mean", "Test accuracy"),
+                      (axes[1, 0], "test_weighted_f1_mean", "Test weighted F1"),
+                      (axes[1, 1], None, "Test minus validation macro F1"))
+        else:
+            panels = ((axes[0, 1], "test_micro_f1_mean", "Test micro F1"),
+                      (axes[1, 0], "test_subset_accuracy_mean", "Test subset accuracy"),
+                      (axes[1, 1], "test_mean_weighted_accuracy_mean", "Test mean weighted accuracy"))
+        for axis, key, label in panels:
+            values = ([row[key] for row in rows] if key else
+                      [row["test_macro_f1_mean"] - row["valid_macro_f1_mean"] for row in rows])
+            axis.plot(test_x, values, marker="o")
+            axis.set(ylabel=label)
+        for axis in axes.flat:
+            axis.set(xlabel="Requested visual-token retention (%)")
+            axis.grid(alpha=0.25)
+        figure.tight_layout()
+        figure.savefig(root / "test_metrics_curve.png", dpi=180)
+        plt.close(figure)
+    print(f"Wrote {root / 'validation_curve.csv'}, validation_curve.png, "
+          f"and test_metrics_curve.png", flush=True)
 
 
 def main(method: str = "divprune") -> int:
@@ -338,11 +384,11 @@ def main(method: str = "divprune") -> int:
                         help="Read predecoded frames only; cache misses become recorded decode failures")
     parser.add_argument("--single-label-csv", type=Path,
                         help="Full seven-class MOSEI ground truth; with a cache, select valid cached clips")
-    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+    parser.add_argument("--prompt-style", choices=tuple(PROMPT_VERSIONS),
                         default="utterance_only")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--ratios", nargs="+", type=float,
-                        help="Retention ratios; seven-class mode defaults to 5,10,15,20,25,30,50,70,90%%")
+                        help="Retention ratios; emotion-prompt modes default to 5,10,15,20,30,50,70%%")
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
     if method == "random":
         parser.add_argument("--random-seed", type=int, default=42,
@@ -376,14 +422,15 @@ def main(method: str = "divprune") -> int:
     single_label_mode = args.single_label_csv is not None
     if single_label_mode and args.prompt_style != "emotion_task":
         parser.error("--single-label-csv requires --prompt-style emotion_task")
-    if not single_label_mode and args.prompt_style != "utterance_only":
-        parser.error("--prompt-style emotion_task requires --single-label-csv")
+    if not single_label_mode and args.prompt_style == "emotion_task":
+        parser.error("--prompt-style emotion_task requires --single-label-csv; use emotion_multilabel_task for six emotions")
     if not 0 <= important_ratio <= 1:
         parser.error("--important-ratio must be in [0, 1]")
     if fastv_k < 1:
         parser.error("--fastv-k must be positive")
     try:
-        args.ratios, names = curve_ratios(args.ratios, single_label_mode)
+        args.ratios, names = curve_ratios(args.ratios, single_label_mode,
+                                         args.prompt_style == "emotion_multilabel_task")
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -393,7 +440,11 @@ def main(method: str = "divprune") -> int:
     default_name = (f"qwen2_5_vl_7b_mosei_{method}_curve"
                     + (f"_seed{random_seed}" if method == "random" else "")
                     + ("_single_label_emotion_prompt_cache_success" if single_label_mode and args.decoded_cache_dir
-                       else "_single_label_emotion_prompt" if single_label_mode else ""))
+                       else "_single_label_emotion_prompt" if single_label_mode
+                       else "_multilabel_emotion_prompt_cache_success"
+                       if args.prompt_style == "emotion_multilabel_task" and args.decoded_cache_dir
+                       else "_multilabel_emotion_prompt"
+                       if args.prompt_style == "emotion_multilabel_task" else ""))
     output_dir = (args.output_dir or stage_root / "results" / default_name).expanduser().resolve()
     protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
     protocol["prompt_style"] = args.prompt_style
@@ -424,12 +475,14 @@ def main(method: str = "divprune") -> int:
     annotation_csv = ground_truth_csv
     cache_selection = None
     subset_fields = subset_rows = None
-    if single_label_mode and decoded_cache_dir:
-        subset_fields, subset_rows, cache_selection = cached_single_label_rows(
+    if decoded_cache_dir:
+        selector = cached_single_label_rows if single_label_mode else cached_multilabel_rows
+        subset_fields, subset_rows, cache_selection = selector(
             ground_truth_csv, decoded_cache_dir, mosei_root / "Raw", protocol)
         split_counts = cache_selection["selected"]
-        annotation_csv = output_dir / "cached_single_label_subset.csv"
-        print(f"Cache-success single-label selection: {json.dumps(cache_selection)}", flush=True)
+        annotation_csv = output_dir / ("cached_single_label_subset.csv" if single_label_mode
+                                       else "cached_multilabel_subset.csv")
+        print(f"Cache-success selection: {json.dumps(cache_selection)}", flush=True)
     else:
         split_counts = single_label_counts(ground_truth_csv) if single_label_mode else SPLIT_COUNTS
     if args.verify_only:

@@ -1,4 +1,4 @@
-"""Portable lookup and integrity metadata for sampled CMU-MOSEI video frames."""
+"""Portable lookup and integrity metadata for sampled Qwen video frames."""
 
 from __future__ import annotations
 

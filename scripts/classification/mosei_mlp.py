@@ -194,7 +194,10 @@ def evaluate(args: argparse.Namespace) -> None:
     thresholds = np.asarray(checkpoint["thresholds"])
     args.output_dir.mkdir(parents=True, exist_ok=True)
     save_predictions(args.output_dir / "predictions.csv", ids, y.numpy(), prob, thresholds)
-    (args.output_dir / "metrics.json").write_text(json.dumps({"coverage": coverage, "metrics": metrics(y.numpy(), prob, thresholds)}, indent=2) + "\n", encoding="utf-8")
+    report = {"coverage": coverage,
+              "metrics": metrics(y.numpy(), prob, thresholds),
+              "metrics_fixed_0_5": metrics(y.numpy(), prob, np.full(6, 0.5))}
+    (args.output_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> None:

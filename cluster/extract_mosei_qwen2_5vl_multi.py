@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cluster.extract_mosei_qwen2_5vl import log, save  # noqa: E402
 from cluster.mosei_video_decoder import TimedVideoDecoder  # noqa: E402
 from cluster.mosei_prompt import make_mosei_prompt  # noqa: E402
+from cluster.meld_prompt import make_meld_prompt  # noqa: E402
 from cluster.qwen2_5_divprune import DivPruneHook  # noqa: E402
 from cluster.qwen_cost import profile_forward_flops  # noqa: E402
 from cluster.qwen_fastv import FastVHook  # noqa: E402
@@ -39,6 +40,10 @@ def chunk_config(args, ratio: float, protocol: dict) -> dict:
               "profile_stride": args.profile_stride}
     if args.prompt_style == "emotion_task":
         config["prompt_style"] = "mosei_seven_class_emotion_task_v1"
+    elif args.prompt_style == "emotion_multilabel_task":
+        config["prompt_style"] = "mosei_six_binary_emotion_task_v1"
+    elif args.prompt_style == "meld_emotion_task":
+        config["prompt_style"] = "meld_seven_class_emotion_task_v1"
     if args.pruning == "random":
         config["random_seed"] = args.random_seed
     if args.pruning == "vispruner":
@@ -154,8 +159,11 @@ def main() -> None:
     parser.add_argument("--index-csv", type=Path, required=True)
     parser.add_argument("--decoded-cache-dir", type=Path,
                         help="Use only predecoded sampled frames from this cache directory")
-    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task"),
+    parser.add_argument("--prompt-style", choices=("utterance_only", "emotion_task",
+                                                  "emotion_multilabel_task", "meld_emotion_task"),
                         default="utterance_only")
+    parser.add_argument("--video-protocol-json", type=Path,
+                        default=Path(__file__).with_name("mosei_video_protocol.json"))
     parser.add_argument("--ratio-output", nargs=2, action="append", required=True,
                         metavar=("RATIO", "OUTPUT_PT"))
     parser.add_argument("--model-dir", type=Path, required=True)
@@ -189,7 +197,7 @@ def main() -> None:
     import torch
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
-    protocol = json.loads((Path(__file__).with_name("mosei_video_protocol.json")).read_text())
+    protocol = json.loads(args.video_protocol_json.read_text())
     protocol["prompt_style"] = args.prompt_style
     expected_ids = {row["sample_id"] for row in rows}
     states = [load_chunk(path, chunk_config(args, ratio, protocol), expected_ids, torch)
@@ -237,7 +245,9 @@ def main() -> None:
                  "min_frames": protocol["min_frames"], "max_frames": protocol["max_frames"],
                  "resized_height": protocol["frame_size"],
                  "resized_width": protocol["frame_size"]},
-                {"type": "text", "text": make_mosei_prompt(row["utterance"], args.prompt_style)},
+                {"type": "text", "text": (make_meld_prompt(row["utterance"])
+                                          if args.prompt_style == "meld_emotion_task" else
+                                          make_mosei_prompt(row["utterance"], args.prompt_style))},
             ]}]
             prompt = processor.apply_chat_template(messages, tokenize=False,
                                                    add_generation_prompt=True)
@@ -262,6 +272,7 @@ def main() -> None:
             log(f"Decode/preprocess error for {sample_id}: {error['error']}")
         else:
             common = {"video_path": str(video_path), "utterance": row["utterance"],
+                      "video_file": row.get("video_file", ""),
                       "video_input_source": "decoded_cache" if args.decoded_cache_dir else "decord",
                       "frame_count": frame_count, "frame_height": frame_height,
                       "frame_width": frame_width, "preprocess_seconds": preprocess_seconds}

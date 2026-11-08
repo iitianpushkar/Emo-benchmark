@@ -108,6 +108,38 @@ class MultiRatioExtractionTest(unittest.TestCase):
                 self.assertEqual(decoded, ["clip-0", "clip-1"])
                 self.assertTrue(all("Task: infer the speaker's overall emotion" in prompt
                                     for prompt in prompts))
+
+                multilabel_outputs = [root / "multilabel_r100.pt", root / "multilabel_r050.pt"]
+                multilabel_argv = [*argv[:], "--prompt-style", "emotion_multilabel_task"]
+                multilabel_argv[multilabel_argv.index(str(outputs[0]))] = str(multilabel_outputs[0])
+                multilabel_argv[multilabel_argv.index(str(outputs[1]))] = str(multilabel_outputs[1])
+                with patch.object(sys, "argv", multilabel_argv):
+                    decoded.clear()
+                    prompts.clear()
+                    multi.main()
+                self.assertEqual(decoded, ["clip-0", "clip-1"])
+                self.assertTrue(all("More than one emotion may be present" in prompt
+                                    for prompt in prompts))
+                for output in multilabel_outputs:
+                    payload = torch.load(output, weights_only=False)
+                    self.assertEqual(payload["config"]["prompt_style"],
+                                     "mosei_six_binary_emotion_task_v1")
+
+                meld_outputs = [root / "meld_r100.pt", root / "meld_r050.pt"]
+                meld_argv = [*argv[:], "--prompt-style", "meld_emotion_task"]
+                meld_argv[meld_argv.index(str(outputs[0]))] = str(meld_outputs[0])
+                meld_argv[meld_argv.index(str(outputs[1]))] = str(meld_outputs[1])
+                with patch.object(sys, "argv", meld_argv):
+                    decoded.clear()
+                    prompts.clear()
+                    multi.main()
+                self.assertEqual(decoded, ["clip-0", "clip-1"])
+                self.assertTrue(all("anger, disgust, fear, joy, neutral, sadness, surprise" in prompt
+                                    for prompt in prompts))
+                for output in meld_outputs:
+                    payload = torch.load(output, weights_only=False)
+                    self.assertEqual(payload["config"]["prompt_style"],
+                                     "meld_seven_class_emotion_task_v1")
                 self.assertTrue(all("Utterance: hello" in prompt for prompt in prompts))
                 for output in prompted_outputs:
                     payload = torch.load(output, weights_only=False)

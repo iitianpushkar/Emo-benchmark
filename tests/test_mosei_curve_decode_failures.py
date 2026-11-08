@@ -52,6 +52,19 @@ class DecodeFailureRecordsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.records()
 
+    def test_multilabel_emotion_prompt_requires_matching_chunk_marker(self):
+        with self.assertRaises(ValueError):
+            decode_failure_records(self.payload, ["clip-a", "clip-b"],
+                                   self.model_dir, 0, 0.3, self.protocol,
+                                   10, "divprune", None, 0.5, 2,
+                                   "emotion_multilabel_task")
+        self.payload["config"]["prompt_style"] = "mosei_six_binary_emotion_task_v1"
+        self.assertEqual(decode_failure_records(self.payload, ["clip-a", "clip-b"],
+                                                self.model_dir, 0, 0.3, self.protocol,
+                                                10, "divprune", None, 0.5, 2,
+                                                "emotion_multilabel_task"),
+                         self.payload["errors"])
+
     def test_partial_training_and_test_metrics_are_accepted_only_at_matching_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

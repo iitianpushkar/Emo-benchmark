@@ -1,5 +1,44 @@
 # Cluster staging and preflight
 
+For a parallel CPU job that predecodes MELD videos into a resumable sampled
+frame cache, see [PREDECODE_MELD.md](PREDECODE_MELD.md).
+
+## MELD cached-frame Qwen2.5-VL-7B baseline and pruning curves
+
+After the MELD predecode job has written `successful_decodes.csv`, run these
+from `codes/Emo-benchmark` in a GPU allocation:
+
+```bash
+~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl7b_baseline.py --root ../.. --verify-only
+~/hf-env/bin/python -u cluster/run_meld_qwen2_5vl7b_baseline.py --root ../.. --chunk-size 500
+~/hf-env/bin/python -u cluster/run_meld_divprune_curve.py --root ../.. --verify-only
+~/hf-env/bin/python -u cluster/run_meld_divprune_curve.py --root ../.. --chunk-size 500
+```
+
+Replace `run_meld_divprune_curve.py` with `run_meld_random_curve.py`,
+`run_meld_uniform_curve.py`, `run_meld_vispruner_curve.py`,
+`run_meld_visionzip_curve.py`, `run_meld_fastv_curve.py`, or
+`run_meld_sparsevlm_curve.py` to run the other methods. The random method has
+`--random-seed 42` by default; each method trains MLPs with seeds 42, 43, and
+44 unless `--seeds` is set. All use `../../models/qwen` (the 7B model) and
+`../../datasets/meld/decoded_qwen_6fps_224_v1` by default. Override paths with
+`--model-dir`, `--meld-root`, and `--decoded-cache-dir` when needed.
+
+The launchers validate each cached frame entry and select the same available
+train, dev, and test clips. They save the exact selection in
+`cached_meld_subset.csv` and print split counts before GPU work. For each clip,
+the pruning extractor loads and preprocesses cached frames once, then runs
+5%, 10%, 15%, 20%, 30%, 50%, and 70% retention in that order. The full baseline
+runs the separate 100% condition. Every condition trains a seven-class MELD
+MLP using the dev split for checkpoint selection and evaluates test in the
+same run. Each output directory contains embeddings, per-seed MLP metrics and
+predictions, `validation_curve.csv`, `summary.json`, and
+`test_metrics_curve.png` with test macro F1, accuracy, and weighted F1. The
+baseline output is
+`../../results/qwen2_5_vl_7b_meld_emotion_prompt_cache_success/`; method
+outputs follow
+`../../results/qwen2_5_vl_7b_meld_<method>_curve_emotion_prompt_cache_success/`.
+
 ## MELD face-only Qwen2.5-VL-3B experiment
 
 The cluster version of the two Kaggle face-token notebooks is
@@ -388,12 +427,50 @@ result directories end in `_single_label_emotion_prompt_cache_success`, keeping
 these runs separate from the six-label curves. Run `--verify-only` first to
 inspect selection and paths. The full `mosei_single_label.csv` supplies ground
 truth; the older embedded-only CSV is not used.
-Seven-class curves run 5%, 10%, 15%, 20%, 25%, 30%, 50%, 70%, then 90%
+Seven-class curves run 5%, 10%, 15%, 20%, 30%, 50%, then 70%
 retention in that order. They do not run or plot a 100% condition. The completed
 full baseline can be added to plots later. The pruning `run.log` starts before
 model and MOSEI verification, so it captures verification progress and the
 selected split counts, as in the full baseline.
 The older six-label protocol below still includes its own 100% condition.
+
+For the six-label multilabel experiment with the same cached frames and
+emotion-aware prompt as its full baseline, use the full `mosei_aligned.csv`
+scores (no `--single-label-csv`):
+
+```bash
+~/hf-env/bin/python -u cluster/run_mosei_qwen2_5vl7b_baseline.py --root ../.. \
+  --prompt-style emotion_multilabel_task \
+  --decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1 \
+  --chunk-size 500
+```
+
+Then run each pruning method with the matching settings:
+
+```bash
+~/hf-env/bin/python -u cluster/run_mosei_divprune_curve.py --root ../.. \
+  --prompt-style emotion_multilabel_task \
+  --decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1 \
+  --chunk-size 500
+```
+
+Run the same flags with `run_mosei_random_curve.py`,
+`run_mosei_uniform_curve.py`, `run_mosei_vispruner_curve.py`,
+`run_mosei_visionzip_curve.py`, `run_mosei_fastv_curve.py`, and
+`run_mosei_sparsevlm_curve.py`. Each launcher verifies the cache-success
+entries, writes `cached_multilabel_subset.csv`, and prints selected
+train/valid/test counts before GPU work. For each clip it loads and preprocesses
+frames once, then runs 5%, 10%, 15%, 20%, 30%, 50%, and 70%
+retention in order. The full baseline supplies the separate 100% reference.
+Each method trains the six-output MLP and evaluates test in the same run.
+Results go to `../../results/qwen2_5_vl_7b_mosei_<method>_curve_multilabel_emotion_prompt_cache_success/`
+(the random method also includes `_seed42` before the suffix). Per-ratio
+`mlp/seed_*/metrics.json` and `test_eval/seed_*/metrics.json` contain the
+multilabel metrics and per-emotion results; `validation_curve.csv` and
+`validation_curve.json` summarize macro/micro F1, subset accuracy, mean
+weighted accuracy, retention, latency, memory, and FLOPs across seeds.
+`test_metrics_curve.png` plots test macro F1, micro F1, subset accuracy, and
+mean weighted accuracy against retention after test evaluation completes.
 
 The [DivPrune protocol](../experiments/token_pruning/qwen2_5_vl_7b_mosei_divprune_curve/README.md)
 uses the same checkpoint, MOSEI splits, frame settings, and classifier family.

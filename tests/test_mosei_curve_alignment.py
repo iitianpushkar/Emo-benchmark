@@ -48,13 +48,21 @@ class CurveAlignmentTests(unittest.TestCase):
 
     def test_seven_class_defaults_to_requested_ascending_grid_and_rejects_100_percent(self):
         ratios, names = curve_ratios(None, True)
-        self.assertEqual(ratios, [.05, .1, .15, .2, .25, .3, .5, .7, .9])
-        self.assertEqual(names, ["r005", "r010", "r015", "r020", "r025",
-                                 "r030", "r050", "r070", "r090"])
+        self.assertEqual(ratios, [.05, .1, .15, .2, .3, .5, .7])
+        self.assertEqual(names, ["r005", "r010", "r015", "r020",
+                                 "r030", "r050", "r070"])
         self.assertNotIn(1.0, ratios)
         with self.assertRaisesRegex(ValueError, "omit 1.0"):
             curve_ratios([1.0, 0.9], True)
         self.assertEqual(curve_ratios(None, False)[1][0], "r100")
+
+    def test_multilabel_emotion_prompt_uses_baseline_matched_grid(self):
+        ratios, names = curve_ratios(None, False, True)
+        self.assertEqual(ratios, [.05, .1, .15, .2, .3, .5, .7])
+        self.assertEqual(names[0], "r005")
+        self.assertEqual(names[-1], "r070")
+        with self.assertRaisesRegex(ValueError, "omit 1.0"):
+            curve_ratios([.05, 1.0], False, True)
 
     def test_seven_class_curve_uses_classification_macro_f1(self):
         class Axis:
@@ -79,7 +87,9 @@ class CurveAlignmentTests(unittest.TestCase):
             def __getitem__(self, position):
                 return self.flat[position[0] * 2 + position[1]]
 
-        figure = SimpleNamespace(tight_layout=lambda: None, savefig=lambda *_args, **_kwargs: None)
+        saved_plots = []
+        figure = SimpleNamespace(tight_layout=lambda: None,
+                                 savefig=lambda path, **_kwargs: saved_plots.append(path.name))
         pyplot = SimpleNamespace(subplots=lambda *_args, **_kwargs: (figure, Axes()),
                                  close=lambda *_args: None)
         matplotlib = ModuleType("matplotlib")
@@ -130,6 +140,24 @@ class CurveAlignmentTests(unittest.TestCase):
             self.assertEqual(row["test_accuracy_mean"], 0.55)
             self.assertNotIn("valid_macro_f1_at_0.5_mean", row)
             self.assertNotIn("delta_valid_macro_f1", row)
+            self.assertIn("test_metrics_curve.png", saved_plots)
+
+            (mlp / "metrics.json").write_text(json.dumps({
+                "checkpoint_macro_f1_at_0.5": 0.4,
+                "validation": {"macro_f1": 0.5, "subset_accuracy": 0.6,
+                               "micro_f1": 0.55, "mean_weighted_accuracy": 0.7}}))
+            (test_eval / "metrics.json").write_text(json.dumps({
+                "metrics": {"macro_f1": 0.35, "micro_f1": 0.4,
+                            "subset_accuracy": 0.45, "mean_weighted_accuracy": 0.65},
+                "metrics_fixed_0_5": {"macro_f1": 0.3}}))
+            with patch.dict(sys.modules, {"matplotlib": matplotlib, "matplotlib.pyplot": pyplot}):
+                write_curve(root, ["r090"], (42,))
+            row = json.loads((root / "validation_curve.json").read_text())[0]
+            self.assertEqual(row["valid_mean_weighted_accuracy_mean"], 0.7)
+            self.assertEqual(row["test_mean_weighted_accuracy_mean"], 0.65)
+            self.assertEqual(row["test_macro_f1_at_0.5_mean"], 0.3)
+            self.assertEqual(saved_plots.count("test_metrics_curve.png"), 2)
+            self.assertNotIn("delta_valid_macro_f1_at_0.5", row)
 
     def test_rejects_different_cached_subset_or_prompt(self):
         config = {"model_config_sha256": "model", "model_index_sha256": "weights",

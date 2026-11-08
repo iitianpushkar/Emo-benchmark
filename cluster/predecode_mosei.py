@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Predecode all original CMU-MOSEI clips into a resumable sampled-frame cache."""
+"""Predecode MOSEI or MELD clips into a resumable sampled-frame cache."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from cluster.live_log import activate_live_log  # noqa: E402
 from cluster.mosei_decoded_cache import cache_available, cache_paths, identity  # noqa: E402
 from cluster.mosei_video_decoder import TimedVideoDecoder  # noqa: E402
-from cluster.preflight import verify_mosei  # noqa: E402
+from cluster.preflight import MELD_CSVS, first_file, verify_meld, verify_mosei  # noqa: E402
 
 SPLIT_COUNTS = {"train": 16326, "valid": 1871, "test": 4659}
 
@@ -84,7 +84,7 @@ def chunk_state(path: Path, ids: list[str]) -> dict:
 def write_manifests(output: Path, cache_dir: Path, expected_counts: dict[str, int]) -> dict:
     successes = {}
     failures = {}
-    for split in SPLIT_COUNTS:
+    for split in expected_counts:
         for path in sorted((output / "chunks" / split).glob("*.json")):
             state = json.loads(path.read_text(encoding="utf-8"))
             for sample_id in state["success_ids"]:
@@ -183,14 +183,16 @@ def finished_tasks(rows, executor: ThreadPoolExecutor, worker, workers: int):
             future.cancel()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(dataset: str = "mosei") -> int:
+    if dataset not in {"mosei", "meld"}:
+        raise ValueError(f"Unknown dataset: {dataset}")
+    splits = tuple(SPLIT_COUNTS) if dataset == "mosei" else ("train", "dev", "test")
+    parser = argparse.ArgumentParser(description=f"Predecode {dataset.upper()} clips into a resumable sampled-frame cache")
     parser.add_argument("--root", type=Path, default=REPO_ROOT.parents[1])
-    parser.add_argument("--mosei-root", type=Path)
+    parser.add_argument(f"--{dataset}-root", type=Path)
     parser.add_argument("--output-dir", type=Path,
-                        help="Default: ROOT/datasets/mosei/decoded_qwen_6fps_224_v1")
-    parser.add_argument("--splits", nargs="+", choices=tuple(SPLIT_COUNTS),
-                        default=list(SPLIT_COUNTS))
+                        help=f"Default: ROOT/datasets/{dataset}/decoded_qwen_6fps_224_v1")
+    parser.add_argument("--splits", nargs="+", choices=splits, default=list(splits))
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--workers", type=int, default=1,
                         help="Parallel Decord workers; for 12 CPUs, start with 6")
@@ -205,16 +207,26 @@ def main() -> int:
         parser.error("Workers, chunk size, save frequency, log frequency, and timeout must be positive; splits must be unique")
 
     root = args.root.expanduser().resolve()
-    mosei = (args.mosei_root or root / "datasets" / "mosei").expanduser().resolve()
-    output = (args.output_dir or mosei / "decoded_qwen_6fps_224_v1").expanduser().resolve()
+    dataset_root = (getattr(args, f"{dataset}_root") or root / "datasets" / dataset).expanduser().resolve()
+    output = (args.output_dir or dataset_root / "decoded_qwen_6fps_224_v1").expanduser().resolve()
     cache_dir = output / "frames"
-    protocol = json.loads((REPO_ROOT / "cluster" / "mosei_video_protocol.json").read_text())
-    data = verify_mosei(mosei, progress_every=500)
+    protocol = json.loads((REPO_ROOT / "cluster" / f"{dataset}_video_protocol.json").read_text())
+    data = (verify_mosei(dataset_root, progress_every=500) if dataset == "mosei"
+            else verify_meld(dataset_root))
+    dataset_root = Path(data["root"]).resolve()
+    expected_counts = (SPLIT_COUNTS if dataset == "mosei" else
+                       {split: data["splits"][split]["rows"] - data["splits"][split]["missing_clips"]
+                        for split in splits})
     environment = decoder_environment()
     print(f"Decoder environment: {environment}", flush=True)
-    source_csv = mosei / "csv" / "mosei_aligned.csv"
-    config = {"source_csv": str(source_csv), "source_sha256": sha256(source_csv),
-              "chunk_size": args.chunk_size,
+    if dataset == "mosei":
+        source_csv = dataset_root / "csv" / "mosei_aligned.csv"
+        source_config = {"source_csv": str(source_csv), "source_sha256": sha256(source_csv)}
+    else:
+        source_paths = {split: first_file(dataset_root, MELD_CSVS[split]) for split in splits}
+        source_config = {"source_csvs": {split: str(path) for split, path in source_paths.items()},
+                         "source_sha256": {split: sha256(path) for split, path in source_paths.items()}}
+    config = {**source_config, "chunk_size": args.chunk_size,
               "frame_protocol": {key: protocol[key] for key in
                                  ("fps", "min_frames", "max_frames", "frame_size")},
               "decoder": "qwen_vl_utils.process_vision_info/decord",
@@ -222,7 +234,8 @@ def main() -> int:
               "qwen_vl_utils_version": environment["qwen-vl-utils"]}
     if args.verify_only:
         print(json.dumps({"dataset": data, "output": str(output), "config": config,
-                          "environment": environment, "workers": args.workers}, indent=2))
+                          "environment": environment, "workers": args.workers,
+                          "expected_clips": expected_counts}, indent=2))
         return 0
 
     output.mkdir(parents=True, exist_ok=True)
@@ -233,15 +246,15 @@ def main() -> int:
     write_json(config_path, config)
     os.environ["HF_HUB_OFFLINE"] = "1"
     index_dir = output / "indexes"
-    subprocess.run([sys.executable, "-u", str(REPO_ROOT / "scripts" / "data" / "prepare_mosei.py"),
-                    "--mosei-root", str(mosei), "--output-dir", str(index_dir)],
+    subprocess.run([sys.executable, "-u", str(REPO_ROOT / "scripts" / "data" / f"prepare_{dataset}.py"),
+                    f"--{dataset}-root", str(dataset_root), "--output-dir", str(index_dir)],
                    cwd=REPO_ROOT, check=True)
-    rows_by_split = {split: load_rows(index_dir / f"mosei_{split}_index.csv", expected)
-                     for split, expected in SPLIT_COUNTS.items()}
+    rows_by_split = {split: load_rows(index_dir / f"{dataset}_{split}_index.csv", expected)
+                     for split, expected in expected_counts.items()}
     print(f"Starting {args.workers} parallel Decord worker(s); "
           f"allocated CPUs={os.environ.get('SLURM_CPUS_PER_TASK', 'unknown')}", flush=True)
     decoders = ParallelDecoders(args.decode_timeout_seconds, cache_dir)
-    executor = ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="mosei_decode")
+    executor = ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix=f"{dataset}_decode")
     try:
         for split in args.splits:
             rows = rows_by_split[split]
@@ -305,12 +318,12 @@ def main() -> int:
                 finally:
                     state["success_ids"] = sorted(success)
                     write_json(path, state)
-                summary = write_manifests(output, cache_dir, SPLIT_COUNTS)
+                summary = write_manifests(output, cache_dir, expected_counts)
                 print(f"Checkpointed {path}; coverage={summary}", flush=True)
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
         decoders.close()
-        write_manifests(output, cache_dir, SPLIT_COUNTS)
+        write_manifests(output, cache_dir, expected_counts)
     print(f"Predecode complete: {output / 'summary.json'}", flush=True)
     return 0
 
