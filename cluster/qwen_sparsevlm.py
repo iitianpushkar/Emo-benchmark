@@ -93,7 +93,8 @@ def text_visual_attention(q_projection: torch.Tensor, k_projection: torch.Tensor
     return matrix if return_matrix else matrix.mean(dim=0)
 
 
-def cluster_and_merge(features: torch.Tensor, centers: int) -> tuple[torch.Tensor, torch.Tensor]:
+def cluster_and_merge(features: torch.Tensor, centers: int,
+                      return_assignments: bool = False):
     """Density-peaks centers and mean aggregation from official SparseVLM utils.py."""
     n, dim = features.shape
     if not 1 <= centers <= n:
@@ -111,14 +112,16 @@ def cluster_and_merge(features: torch.Tensor, centers: int) -> tuple[torch.Tenso
     merged = torch.zeros((centers, dim), dtype=features.dtype, device=features.device)
     merged.index_add_(0, assignments, features)
     counts = torch.bincount(assignments, minlength=centers).to(features.dtype).clamp_min(1)
-    return rank, merged / counts[:, None]
+    result = merged / counts[:, None]
+    return (rank, result, assignments) if return_assignments else (rank, result)
 
 
 class SparseVLMHook:
     """Apply progressive pruning/recycling after decoder layers 2, 6, and 15."""
 
     def __init__(self, model, input_ids: torch.Tensor, retain_ratio: float,
-                 stages: tuple[int, ...] = DEFAULT_STAGES):
+                 stages: tuple[int, ...] = DEFAULT_STAGES,
+                 frozen_plan: list[dict] | None = None):
         if not 0 < retain_ratio <= 1 or input_ids.ndim != 2 or input_ids.shape[0] != 1:
             raise ValueError("SparseVLM requires batch one and retention in (0, 1]")
         self.layers = model.model.language_model.layers
@@ -147,21 +150,27 @@ class SparseVLMHook:
         self._q = self._k = None
         self.handles = []
         self.stage_metadata = []
+        self.stage_plan = []
+        self.frozen_plan = frozen_plan
+        if frozen_plan is not None and len(frozen_plan) != len(stages):
+            raise ValueError("SparseVLM frozen plan must contain one entry per stage")
         self._completed_stages = 0
         self._layer_calls = 0
 
     def __enter__(self):
         if self.retain_ratio == 1:
             return self
-        self.handles.append(self.layers[0].register_forward_pre_hook(self._select_raters, with_kwargs=True))
+        if self.frozen_plan is None:
+            self.handles.append(self.layers[0].register_forward_pre_hook(self._select_raters, with_kwargs=True))
         for index, layer in enumerate(self.layers):
             if index:
                 self.handles.append(layer.register_forward_pre_hook(self._prepare_layer, with_kwargs=True))
             if index in self.stages:
-                attn = layer.self_attn
-                self.handles.append(attn.q_proj.register_forward_hook(self._capture_q))
-                self.handles.append(attn.k_proj.register_forward_hook(self._capture_k))
-                self.handles.append(attn.register_forward_hook(self._score, with_kwargs=True))
+                if self.frozen_plan is None:
+                    attn = layer.self_attn
+                    self.handles.append(attn.q_proj.register_forward_hook(self._capture_q))
+                    self.handles.append(attn.k_proj.register_forward_hook(self._capture_k))
+                    self.handles.append(attn.register_forward_hook(self._score, with_kwargs=True))
                 self.handles.append(layer.register_forward_hook(self._finish_stage))
         return self
 
@@ -189,7 +198,7 @@ class SparseVLMHook:
 
     def _prepare_layer(self, _module, args, kwargs):
         self._layer_calls += 1
-        if self.raters is None or self._layer_calls >= len(self.layers):
+        if (self.raters is None and self.frozen_plan is None) or self._layer_calls >= len(self.layers):
             raise RuntimeError("SparseVLM layer state is inconsistent")
         hidden = args[0]
         if hidden.shape[1] != self.active.numel():
@@ -245,11 +254,35 @@ class SparseVLMHook:
 
     def _finish_stage(self, _module, _args, output):
         stage = self._completed_stages
-        if self.scores is None or stage >= len(self.stages):
+        if (self.scores is None and self.frozen_plan is None) or stage >= len(self.stages):
             raise RuntimeError("SparseVLM stage did not receive attention scores")
         hidden = output[0] if isinstance(output, tuple) else output
         visual_relative = torch.where(self.video_mask.to(self.active.device)[self.active])[0]
         current = int(visual_relative.numel())
+        if self.frozen_plan is not None:
+            plan = self.frozen_plan[stage]
+            selected = torch.tensor(plan["selected_positions"], device=self.active.device)
+            if selected.numel() != plan["target"] or selected.numel() < self.final_budget:
+                raise ValueError("SparseVLM frozen stage budget is invalid")
+            active_visual = self.active[visual_relative]
+            if not torch.isin(selected, active_visual).all():
+                raise ValueError("SparseVLM frozen plan refers to absent visual tokens")
+            for center, members in plan["recycling_groups"].items():
+                member_positions = torch.tensor(members, device=self.active.device)
+                relative = torch.searchsorted(self.active, member_positions)
+                if not torch.equal(self.active[relative], member_positions):
+                    raise ValueError("SparseVLM recycling group refers to absent tokens")
+                self.replacements[int(center)] = hidden[0].index_select(0, relative).mean(dim=0)
+            keep = ~self.video_mask.to(self.active.device)[self.active]
+            keep[torch.searchsorted(self.active, selected)] = True
+            self.next_active = self.active[keep]
+            self.retained_tokens = int(selected.numel())
+            self.retained_sequence_tokens = int(self.next_active.numel())
+            self.stage_metadata.append({"layer": self.stages[stage], "output_visual_tokens": self.retained_tokens,
+                                        "frozen_from_video_only": True})
+            self._completed_stages += 1
+            self.scores = self.priority = self.priority_rank = None
+            return
         target, proposed_deletions = rank_adaptive_target(
             current, self.priority_rank, self.final_budget, self.lam,
             last_stage=stage == len(self.stages) - 1,
@@ -259,11 +292,16 @@ class SparseVLMHook:
         retained_relative = visual_relative.index_select(0, rank[:direct])
         dropped_relative = visual_relative.index_select(0, rank[direct:])
         recycled_relative = torch.empty(0, dtype=torch.long, device=self.active.device)
+        recycling_groups = {}
         if merged_count:
             candidates = min(dropped_relative.numel(), int(dropped_relative.numel() * 0.3) + 1)
             chosen = dropped_relative[:candidates]
-            centers, features = cluster_and_merge(hidden[0].index_select(0, chosen), merged_count)
+            centers, features, assignments = cluster_and_merge(
+                hidden[0].index_select(0, chosen), merged_count, return_assignments=True)
             recycled_relative = chosen.index_select(0, centers)
+            for group_index, center in enumerate(recycled_relative.tolist()):
+                members = chosen[assignments == group_index]
+                recycling_groups[int(self.active[center])] = self.active.index_select(0, members).tolist()
             for absolute, feature in zip(self.active.index_select(0, recycled_relative).tolist(), features):
                 self.replacements[absolute] = feature
         selected_relative = torch.cat((retained_relative, recycled_relative))
@@ -276,6 +314,10 @@ class SparseVLMHook:
             raise RuntimeError("SparseVLM lost the last prompt token")
         self.retained_tokens = target
         self.retained_sequence_tokens = int(self.next_active.numel())
+        self.stage_plan.append({"target": target,
+                                "selected_positions": self.active.index_select(0, selected_relative).tolist(),
+                                "recycled_positions": self.active.index_select(0, recycled_relative).tolist(),
+                                "recycling_groups": recycling_groups})
         self.stage_metadata.append({"layer": self.stages[stage], "input_visual_tokens": current,
                                     "priority_matrix_rank": self.priority_rank,
                                     "priority_matrix_shape": list(self.priority.shape),

@@ -647,3 +647,38 @@ clustered discarded tokens. It uses the same 224 × 224, 6 FPS MOSEI inputs and
 `python cluster/run_mosei_sparsevlm_curve.py --root ../.. --verify-only` on the
 login node, smoke test one clip on the GPU, then run the curve on a GPU node.
 Follow `../../results/qwen2_5_vl_7b_mosei_sparsevlm_curve/run.log`.
+
+## 10. Retained-video LM-head utterance ablation
+
+`run_qwen7b_retained_visual_utterance_ablation.py` compares two paired passes
+on every selected cached test clip: retained video plus an emotion prompt,
+then the same retained video plus the utterance and the same prompt. It uses
+Qwen2.5-VL-7B's first LM-head token, normalized over Y/N for each of MOSEI's
+six binary emotions or over A–G for MELD's seven classes. The visual token
+positions are checked across passes; SparseVLM replays the video-only stage
+selection and recycling groups in the utterance pass.
+
+The fixed ratios come from the previously evaluated test curves and are
+exploratory: MOSEI DivPrune 20%, Random 30%, SparseVLM 15%, VisPruner 20%,
+VisionZip 15%; MELD DivPrune 5%, Random 10%, SparseVLM 15%, VisPruner 15%,
+VisionZip 10%. To run all five methods for one dataset from `codes/Emo-benchmark`:
+
+```bash
+~/hf-env/bin/python -u cluster/run_qwen7b_retained_visual_utterance_ablation.py \
+  --dataset mosei --root ../.. \
+  --aligned-csv ../../datasets/mosei/csv/mosei_aligned.csv \
+  --decoded-cache-dir ../../datasets/mosei/decoded_qwen_6fps_224_v1
+
+~/hf-env/bin/python -u cluster/run_qwen7b_retained_visual_utterance_ablation.py \
+  --dataset meld --root ../.. \
+  --decoded-cache-dir ../../datasets/meld/decoded_qwen_6fps_224_v1
+```
+
+Use `--verify-only` before GPU work. For a one-clip GPU smoke test, use
+`--method visionzip --limit 1 --output-dir ../../results/retained_visual_smoke`
+so its selected subset does not occupy the full run's output directory.
+Each method saves `run_config.json`, `selected_test.csv`,
+`per_emotion_probabilities.csv`, `summary.json`, and
+`ground_truth_probability_change.png` under
+`../../results/qwen2_5_vl_7b_<dataset>_retained_visual_utterance_lm_head_test/<method>/`.
+Runs resume by complete clip and reject a changed configuration.

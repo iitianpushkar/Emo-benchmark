@@ -34,6 +34,7 @@ class DivPruneHook:
         if self.full_tokens == 0:
             raise ValueError("Qwen2.5 input contains no expanded video tokens")
         self.retained_tokens = self.full_tokens
+        self.selected_video_positions = None
         self.retained_sequence_tokens = self.full_sequence_tokens
         self.visionzip_dominant_tokens = None
         self.visionzip_contextual_tokens = None
@@ -96,6 +97,9 @@ class DivPruneHook:
         else:
             keep, selected = build_divprune_sequence_indices(embeds, video_mask, self.retain_ratio)
         self.retained_tokens = int(selected.numel())
+        selected_positions = (torch.where(video_mask[0])[0].index_select(0, selected)
+                              if self.method == "visionzip" else selected)
+        self.selected_video_positions = selected_positions.detach().cpu().tolist()
         self.retained_sequence_tokens = int(keep.numel())
 
         updated = dict(kwargs)
