@@ -91,6 +91,7 @@ def pruned_probability(model, inputs, candidate_ids, torch, method, ratio, seed,
 
 def score_clip(row, dataset, method, ratio, model, processor, cache_dir, protocol, token_ids, torch,
                random_seed):
+    utterance = " ".join(row["text"].split()) if dataset == "mosei" else row["utterance"]
     video_path = Path(row["video_path"] if dataset == "meld" else row["_video_path"])
     cached = load_cached(cache_dir, identity(row["sample_id"], video_path, protocol))
     if cached is None:
@@ -102,9 +103,9 @@ def score_clip(row, dataset, method, ratio, model, processor, cache_dir, protoco
     output = []
     for code in codes:
         only_inputs = prepare_inputs(processor, model, video_path, protocol,
-            paired_prompt(dataset, row["utterance"], code, False), images, videos, video_kwargs)
+            paired_prompt(dataset, utterance, code, False), images, videos, video_kwargs)
         both_inputs = prepare_inputs(processor, model, video_path, protocol,
-            paired_prompt(dataset, row["utterance"], code, True), images, videos, video_kwargs)
+            paired_prompt(dataset, utterance, code, True), images, videos, video_kwargs)
         video_id = model.config.video_token_id
         only_video_positions = torch.where(only_inputs["input_ids"][0].eq(video_id))[0]
         both_video_positions = torch.where(both_inputs["input_ids"][0].eq(video_id))[0]

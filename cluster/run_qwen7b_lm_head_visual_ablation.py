@@ -181,6 +181,7 @@ def video_only_probability(model, processor, dataset: str, code: str | None,
 def score_clip(row: dict, dataset: str, model, processor, cache_dir: Path,
                protocol: dict, token_ids: list[int], torch) -> list[dict]:
     sample_id = row["sample_id"]
+    utterance = " ".join(row["text"].split()) if dataset == "mosei" else row["utterance"]
     video_path = (Path(row["video_path"]) if dataset == "meld" else
                   Path(row["_video_path"]))
     cached = load_cached(cache_dir, identity(sample_id, video_path, protocol))
@@ -192,7 +193,7 @@ def score_clip(row: dict, dataset: str, model, processor, cache_dir: Path,
     codes = tuple(labels) if dataset == "mosei" else (None,)
     output_rows = []
     for code in codes:
-        prompt = prompt_for(dataset, row["utterance"], code)
+        prompt = prompt_for(dataset, utterance, code)
         messages = messages_for(video_path, protocol, prompt)
         text = processor.apply_chat_template(messages, tokenize=False,
                                              add_generation_prompt=True)
@@ -201,7 +202,7 @@ def score_clip(row: dict, dataset: str, model, processor, cache_dir: Path,
                            do_resize=False, **video_kwargs).to(model.device)
         full, absent, visual_tokens = probability_pair(model, inputs, token_ids, torch)
         utterance_only = utterance_only_probability(
-            model, processor, dataset, row["utterance"], code, token_ids, torch)
+            model, processor, dataset, utterance, code, token_ids, torch)
         video_only = video_only_probability(
             model, processor, dataset, code, video_path, protocol, images,
             video_tensors, video_metadata, video_kwargs, token_ids, torch)

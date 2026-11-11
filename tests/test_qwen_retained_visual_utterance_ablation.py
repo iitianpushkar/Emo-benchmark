@@ -53,7 +53,7 @@ class RetainedVisualUtteranceTests(unittest.TestCase):
                 self.last_text = text[0]
                 return Inputs(input_ids=torch.tensor([[1, 99, 99, 2]]))
 
-        row = {"sample_id": "clip", "utterance": "secret", "_video_path": "/tmp/x.mp4",
+        row = {"sample_id": "clip", "text": "secret", "_video_path": "/tmp/x.mp4",
                **{emotion: "1" if emotion == "happy" else "0" for emotion in
                   ("anger", "disgust", "fear", "happy", "sad", "surprise")}}
         model = SimpleNamespace(device="cpu", config=SimpleNamespace(video_token_id=99))

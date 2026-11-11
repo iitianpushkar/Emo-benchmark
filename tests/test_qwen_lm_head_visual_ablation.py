@@ -205,9 +205,11 @@ def test_score_clip_writes_all_four_conditions_for_both_datasets():
     model = SimpleNamespace(device="cpu")
     cached = (None, [(torch.zeros(4, 3, 224, 224), {})], {})
     for dataset in ("mosei", "meld"):
-        row = {"sample_id": "clip", "utterance": "hello", "_video_path": "/tmp/x.mp4",
+        row = {"sample_id": "clip", "text": "hello", "_video_path": "/tmp/x.mp4",
                "video_path": "/tmp/x.mp4", "emotion": "joy",
                **{name: "1" if name == "happy" else "0" for name in MOSEI_EMOTIONS}}
+        if dataset == "meld":
+            row["utterance"] = row.pop("text")
         count = 6 if dataset == "mosei" else 7
         full = ([0.8, 0.2] if dataset == "mosei" else [1 / 7] * 7)
         no_visual = ([0.6, 0.4] if dataset == "mosei" else [1 / 7] * 7)
