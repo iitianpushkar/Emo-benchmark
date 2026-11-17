@@ -8,6 +8,7 @@ ordinary directory ready for the user to zip or download.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -41,6 +42,29 @@ SKIP_PARTS = {
     "embeddings", "chunks", "checkpoints", "indexes", "attention_heatmaps",
     "__pycache__",
 }
+BASELINE_DIRS = {
+    "mosei": RESULT_DIRS[0],
+    "meld": RESULT_DIRS[8],
+}
+
+
+def choose_sample_id(root: Path, dataset: str) -> str:
+    """Choose the first baseline test clip also listed as a successful decode."""
+    index = root / "results" / BASELINE_DIRS[dataset] / "indexes" / f"{dataset}_test_index.csv"
+    manifest = root / "datasets" / dataset / "decoded_qwen_6fps_224_v1" / "successful_decodes.csv"
+    with manifest.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if not {"sample_id", "split"} <= set(reader.fieldnames or ()):
+            raise ValueError(f"{manifest}: expected sample_id and split columns")
+        successful = {row["sample_id"] for row in reader if row["split"] == "test"}
+    with index.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if not {"sample_id", "split"} <= set(reader.fieldnames or ()):
+            raise ValueError(f"{index}: expected sample_id and split columns")
+        for row in reader:
+            if row["split"] == "test" and row["sample_id"] in successful:
+                return row["sample_id"]
+    raise ValueError(f"No test clip in both {index} and {manifest}")
 
 
 def result_files(results_root: Path) -> list[tuple[Path, Path]]:
@@ -81,16 +105,13 @@ def main() -> int:
                         help="Project root containing results/, datasets/, and models/")
     parser.add_argument("--output-dir", type=Path,
                         help="New directory for the download bundle; default ROOT/cvpr_results_bundle")
-    parser.add_argument("--mosei-sample-id", help="Exact MOSEI test sample ID for full-baseline heatmaps")
-    parser.add_argument("--meld-sample-id", help="Exact MELD test sample ID for full-baseline heatmaps")
+    parser.add_argument("--mosei-sample-id", help="Override automatic MOSEI test clip selection")
+    parser.add_argument("--meld-sample-id", help="Override automatic MELD test clip selection")
     parser.add_argument("--skip-attention", action="store_true",
                         help="Collect existing result files without GPU visualization")
     parser.add_argument("--list-only", action="store_true",
                         help="Show selected file counts and validate samples without copying or GPU work")
     args = parser.parse_args()
-    if not args.skip_attention and (not args.mosei_sample_id or not args.meld_sample_id):
-        parser.error("Provide both --mosei-sample-id and --meld-sample-id, or use --skip-attention")
-
     root = args.root.expanduser().resolve()
     results_root = root / "results"
     output_dir = (args.output_dir or root / "cvpr_results_bundle").expanduser().resolve()
@@ -107,9 +128,12 @@ def main() -> int:
     total_bytes = sum(source.stat().st_size for source, _ in files)
     print(f"Selected {len(files)} files ({total_bytes / (1024 ** 2):.1f} MiB)", flush=True)
     if not args.skip_attention:
+        mosei_sample_id = args.mosei_sample_id or choose_sample_id(root, "mosei")
+        meld_sample_id = args.meld_sample_id or choose_sample_id(root, "meld")
+        print(f"Attention samples: MOSEI {mosei_sample_id}; MELD {meld_sample_id}", flush=True)
         # Catch sample/index/cache errors before loading a GPU model.
-        for dataset, sample_id in (("mosei", args.mosei_sample_id),
-                                   ("meld", args.meld_sample_id)):
+        for dataset, sample_id in (("mosei", mosei_sample_id),
+                                   ("meld", meld_sample_id)):
             visualize(root, dataset, sample_id, output_dir / "attention" / dataset,
                       verify_only=True)
     if args.list_only:
@@ -125,8 +149,8 @@ def main() -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         if not args.skip_attention:
-            for dataset, sample_id in (("mosei", args.mosei_sample_id),
-                                       ("meld", args.meld_sample_id)):
+            for dataset, sample_id in (("mosei", mosei_sample_id),
+                                       ("meld", meld_sample_id)):
                 attention_dir = staging / "attention" / dataset
                 visualize(root, dataset, sample_id, attention_dir)
                 # Raw arrays can be regenerated from the cached clip and are large.
@@ -139,7 +163,7 @@ def main() -> int:
             "result_file_count": len(files),
             "result_total_bytes": total_bytes,
             "attention_samples": (None if args.skip_attention else {
-                "mosei": args.mosei_sample_id, "meld": args.meld_sample_id}),
+                "mosei": mosei_sample_id, "meld": meld_sample_id}),
             "included_suffixes": sorted(KEEP_SUFFIXES),
             "excluded_directories": sorted(SKIP_PARTS),
         }

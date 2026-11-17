@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.analysis.bundle_mosei_meld_results import RESULT_DIRS
+from scripts.analysis.bundle_mosei_meld_results import RESULT_DIRS, choose_sample_id
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -15,6 +15,19 @@ SCRIPT = REPO / "scripts" / "analysis" / "bundle_mosei_meld_results.py"
 
 
 class BundleResultsTests(unittest.TestCase):
+    def test_chooses_first_cached_baseline_test_sample(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for dataset, baseline in (("mosei", RESULT_DIRS[0]), ("meld", RESULT_DIRS[8])):
+                index = root / "results" / baseline / "indexes" / f"{dataset}_test_index.csv"
+                index.parent.mkdir(parents=True)
+                index.write_text("sample_id,split\nnot_cached,test\nchosen,test\nlater,test\n")
+                manifest = (root / "datasets" / dataset / "decoded_qwen_6fps_224_v1"
+                            / "successful_decodes.csv")
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text("sample_id,split\nnot_cached,train\nchosen,test\nlater,test\n")
+                self.assertEqual(choose_sample_id(root, dataset), "chosen")
+
     def test_collects_only_selected_compact_outputs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

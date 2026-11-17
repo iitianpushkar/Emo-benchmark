@@ -685,18 +685,17 @@ Runs resume by complete clip and reject a changed configuration.
 
 ## 11. Bundle compact MOSEI and MELD 7B results for download
 
-From `codes/Emo-benchmark` on Rorqual, choose one **test** `sample_id` from each
-full baseline's `indexes/mosei_test_index.csv` and `indexes/meld_test_index.csv`.
-Then run:
+From `codes/Emo-benchmark` on Rorqual, run:
 
 ```bash
 ~/hf-env/bin/python -u scripts/analysis/bundle_mosei_meld_results.py \
-  --root ../.. \
-  --mosei-sample-id 'YOUR_MOSEI_TEST_SAMPLE_ID' \
-  --meld-sample-id 'YOUR_MELD_TEST_SAMPLE_ID'
+  --root ../..
 ```
 
-The script checks both cached samples first, renders full-baseline attention
+The script chooses the first test clip shared by each baseline index and
+successful-decode manifest. You can override either choice with
+`--mosei-sample-id` or `--meld-sample-id`. It checks both cached samples first,
+renders full-baseline attention
 heatmaps for every decoder layer and frame, and creates
 `../../cvpr_results_bundle/`. It copies CSV, JSON, and PNG files from the
 MOSEI six-label full baseline, its five pruning curves, and its two LM-head
