@@ -682,3 +682,27 @@ Each method saves `run_config.json`, `selected_test.csv`,
 `ground_truth_probability_change.png` under
 `../../results/qwen2_5_vl_7b_<dataset>_retained_visual_utterance_lm_head_test/<method>/`.
 Runs resume by complete clip and reject a changed configuration.
+
+## 11. Bundle compact MOSEI and MELD 7B results for download
+
+From `codes/Emo-benchmark` on Rorqual, choose one **test** `sample_id` from each
+full baseline's `indexes/mosei_test_index.csv` and `indexes/meld_test_index.csv`.
+Then run:
+
+```bash
+~/hf-env/bin/python -u scripts/analysis/bundle_mosei_meld_results.py \
+  --root ../.. \
+  --mosei-sample-id 'YOUR_MOSEI_TEST_SAMPLE_ID' \
+  --meld-sample-id 'YOUR_MELD_TEST_SAMPLE_ID'
+```
+
+The script checks both cached samples first, renders full-baseline attention
+heatmaps for every decoder layer and frame, and creates
+`../../cvpr_results_bundle/`. It copies CSV, JSON, and PNG files from the
+MOSEI six-label full baseline, its five pruning curves, and its two LM-head
+ablations; it does the same for the 7B MELD runs. It excludes embeddings,
+checkpoints, indexes, and any earlier attention folders. The two selected
+heatmap examples are under `attention/mosei/` and `attention/meld/`, and
+`bundle_manifest.json` records the selected result directories and samples.
+The script does not make a zip file. Use `--list-only` to check selection
+without GPU work, or `--skip-attention` to collect result files alone.
