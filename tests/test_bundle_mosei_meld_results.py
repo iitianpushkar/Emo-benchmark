@@ -17,7 +17,8 @@ SCRIPT = REPO / "scripts" / "analysis" / "bundle_mosei_meld_results.py"
 
 class BundleResultsTests(unittest.TestCase):
     def test_dash_prefixed_mosei_id_is_one_argument(self):
-        with patch("scripts.analysis.bundle_mosei_meld_results.subprocess.run") as run:
+        with patch("scripts.analysis.bundle_mosei_meld_results.subprocess.Popen") as run:
+            run.return_value.wait.return_value = 0
             visualize(Path("/tmp/project"), "mosei", "-6rXp3zJ3kc[3]",
                       Path("/tmp/attention"), verify_only=True)
         command = run.call_args.args[0]
@@ -56,9 +57,11 @@ class BundleResultsTests(unittest.TestCase):
             unrelated.mkdir()
             (unrelated / "summary.json").write_text("{}")
             output = root / "download"
-            subprocess.run([sys.executable, str(SCRIPT), "--root", str(root),
+            completed = subprocess.run([sys.executable, str(SCRIPT), "--root", str(root),
                             "--output-dir", str(output), "--skip-attention"],
                            check=True, capture_output=True, text=True)
+            self.assertIn("Copied 1/", completed.stdout)
+            self.assertIn("Bundle ready:", completed.stdout)
             manifest = json.loads((output / "bundle_manifest.json").read_text())
             self.assertEqual(manifest["result_file_count"], 3 * len(RESULT_DIRS))
             self.assertEqual(len(list((output / "results").rglob("*.csv"))), len(RESULT_DIRS))

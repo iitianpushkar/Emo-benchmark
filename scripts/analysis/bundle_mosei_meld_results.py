@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -46,6 +47,11 @@ BASELINE_DIRS = {
     "mosei": RESULT_DIRS[0],
     "meld": RESULT_DIRS[8],
 }
+STARTED = time.monotonic()
+
+
+def log(message: str) -> None:
+    print(f"[bundle +{time.monotonic() - STARTED:.1f}s] {message}", flush=True)
 
 
 def choose_sample_id(root: Path, dataset: str) -> str:
@@ -95,8 +101,19 @@ def visualize(root: Path, dataset: str, sample_id: str, destination: Path,
         command.extend(("--prompt-style", "emotion_multilabel_task"))
     if verify_only:
         command.append("--verify-only")
-    print("Running:", " ".join(command), flush=True)
-    subprocess.run(command, cwd=REPO, check=True)
+    action = "Checking" if verify_only else "Rendering"
+    log(f"{action} {dataset.upper()} sample {sample_id}")
+    process = subprocess.Popen(command, cwd=REPO)
+    while True:
+        try:
+            status = process.wait(timeout=45)
+            break
+        except subprocess.TimeoutExpired:
+            log(f"Still {action.lower()} {dataset.upper()} sample {sample_id}; "
+                "the attention script prints each completed decoder layer")
+    if status:
+        raise subprocess.CalledProcessError(status, command)
+    log(f"Finished {action.lower()} {dataset.upper()} sample {sample_id}")
 
 
 def main() -> int:
@@ -119,42 +136,52 @@ def main() -> int:
         parser.error("Output directory must be outside ROOT/results")
     if output_dir.exists() and not args.list_only:
         parser.error(f"Output directory already exists: {output_dir}; choose a new path")
+    log("Scanning the 16 selected experiment directories")
     files = result_files(results_root)
     counts = {name: 0 for name in RESULT_DIRS}
     for _, relative in files:
         counts[relative.parts[1]] += 1
     for name, count in counts.items():
-        print(f"{name}: {count} CSV/JSON/PNG files", flush=True)
+        log(f"Found {count} CSV/JSON/PNG files in {name}")
     total_bytes = sum(source.stat().st_size for source, _ in files)
-    print(f"Selected {len(files)} files ({total_bytes / (1024 ** 2):.1f} MiB)", flush=True)
+    log(f"Selected {len(files)} files ({total_bytes / (1024 ** 2):.1f} MiB)")
     if not args.skip_attention:
+        log("Choosing one cached test clip per dataset")
         mosei_sample_id = args.mosei_sample_id or choose_sample_id(root, "mosei")
         meld_sample_id = args.meld_sample_id or choose_sample_id(root, "meld")
-        print(f"Attention samples: MOSEI {mosei_sample_id}; MELD {meld_sample_id}", flush=True)
+        log(f"Attention samples: MOSEI {mosei_sample_id}; MELD {meld_sample_id}")
         # Catch sample/index/cache errors before loading a GPU model.
         for dataset, sample_id in (("mosei", mosei_sample_id),
                                    ("meld", meld_sample_id)):
             visualize(root, dataset, sample_id, output_dir / "attention" / dataset,
                       verify_only=True)
     if args.list_only:
-        print(f"Would collect {len(files)} files into {output_dir}", flush=True)
+        log(f"Would collect {len(files)} files into {output_dir}")
         return 0
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output_dir.name}.", dir=output_dir.parent) as temp:
         staging = Path(temp) / "bundle"
         staging.mkdir()
-        for source, relative in files:
+        log(f"Copying results into temporary bundle at {staging}")
+        copied_bytes = 0
+        for index, (source, relative) in enumerate(files, start=1):
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+            copied_bytes += source.stat().st_size
+            if index == 1 or index % 100 == 0 or index == len(files):
+                log(f"Copied {index}/{len(files)} files "
+                    f"({copied_bytes / (1024 ** 2):.1f}/{total_bytes / (1024 ** 2):.1f} MiB)")
         if not args.skip_attention:
+            log("Result files copied; starting attention visualization")
             for dataset, sample_id in (("mosei", mosei_sample_id),
                                        ("meld", meld_sample_id)):
                 attention_dir = staging / "attention" / dataset
                 visualize(root, dataset, sample_id, attention_dir)
                 # Raw arrays can be regenerated from the cached clip and are large.
                 (attention_dir / "attention_arrays.npz").unlink(missing_ok=True)
+        log("Writing bundle manifest and moving the finished bundle into place")
         manifest = {
             "source_root": str(root),
             "datasets": ["mosei_multilabel", "meld"],
@@ -169,7 +196,7 @@ def main() -> int:
         }
         (staging / "bundle_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         os.replace(staging, output_dir)
-    print(f"Bundle ready: {output_dir} ({len(files)} result files plus attention overlays)", flush=True)
+    log(f"Bundle ready: {output_dir} ({len(files)} result files plus attention overlays)")
     return 0
 
 
