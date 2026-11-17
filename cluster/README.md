@@ -56,8 +56,12 @@ Replace the example ID with an ID in that test index. Use `--split train` or
 The output is under the baseline's `attention_heatmaps/<sample_id>/` folder:
 `layer_overlays/layer_00.png` through the final decoder layer each show **all
 cached frames** with that layer's final prompt-token attention overlaid.
-The script also saves raw scores and layer summaries. Qwen's temporal patching
+The script also saves each decoded RGB frame under `frames/` and a
+`frames_contact_sheet.png` for viewing the frames without heatmaps, along with
+raw scores and layer summaries. Qwen's temporal patching
 can assign the same decoder-level map to two adjacent frames.
+For an existing heatmap folder, `--frames-only --output-dir PATH` adds the
+original frame PNGs from cache without loading the GPU model.
 
 ## MELD face-only Qwen2.5-VL-3B experiment
 
@@ -469,7 +473,8 @@ under the matching baseline result directory in
 `attention_heatmaps/<sample_id>/layer_overlays/layer_00.png` and one PNG for
 each remaining decoder layer. Use `--verify-only` to check the selected clip,
 cache, prompt, and model before GPU work. A temporal patch can cover two frames,
-so adjacent frames may display the same decoder-level map.
+so adjacent frames may display the same decoder-level map. Original decoded
+frames are also saved under `frames/` and in `frames_contact_sheet.png`.
 
 For the six-label multilabel experiment with the same cached frames and
 emotion-aware prompt as its full baseline, use the full `mosei_aligned.csv`

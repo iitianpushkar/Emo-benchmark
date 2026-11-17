@@ -47,6 +47,35 @@ def frame_group_indices(frame_count: int, temporal_groups: int,
     return [frame_index // temporal_patch_size for frame_index in range(frame_count)]
 
 
+def save_original_frames(output_dir: Path, frames: np.ndarray) -> None:
+    """Save the exact cached RGB frames as PNGs and one contact sheet."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    frame_dir = output_dir / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    for index, frame in enumerate(frames):
+        plt.imsave(frame_dir / f"frame_{index:03d}.png", frame)
+    columns = min(8, len(frames))
+    rows = math.ceil(len(frames) / columns)
+    figure, axes = plt.subplots(rows, columns, figsize=(2.45 * columns, 2.65 * rows),
+                                squeeze=False)
+    for index, axis in enumerate(axes.flat):
+        if index >= len(frames):
+            axis.axis("off")
+            continue
+        axis.imshow(frames[index])
+        axis.set_title(f"Frame {index}", fontsize=9)
+        axis.set_xticks([])
+        axis.set_yticks([])
+    figure.suptitle("Decoded frames before attention overlay", fontsize=12)
+    figure.tight_layout(rect=(0, 0, 1, 0.97))
+    figure.savefig(output_dir / "frames_contact_sheet.png", dpi=150)
+    plt.close(figure)
+    print(f"Saved {len(frames)} original decoded frames and contact sheet", flush=True)
+
+
 def save_every_frame_overlays(output_dir: Path, frames: np.ndarray, visual: np.ndarray,
                               temporal_patch_size: int) -> None:
     import matplotlib
@@ -70,7 +99,7 @@ def save_every_frame_overlays(output_dir: Path, frames: np.ndarray, visual: np.n
             heat = visual[layer, group] / shared_max
             axis.imshow(frames[frame_index])
             axis.imshow(heat, cmap="inferno", vmin=0, vmax=1,
-                        interpolation="bilinear", alpha=np.clip(heat * 0.7, 0, 0.7))
+                        interpolation="bilinear", alpha=np.clip(heat * 0.45, 0, 0.45))
             axis.set_title(f"Frame {frame_index} · group {group}", fontsize=9)
             axis.set_xticks([])
             axis.set_yticks([])
@@ -102,6 +131,8 @@ def main(dataset: str = "meld") -> int:
     parser.add_argument("--decoded-cache-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--frames-only", action="store_true",
+                        help="Save decoded frame PNGs from cache without loading the GPU model")
     args = parser.parse_args()
 
     root = args.root.expanduser().resolve()
@@ -127,13 +158,33 @@ def main(dataset: str = "meld") -> int:
     protocol["prompt_style"] = prompt_style
     if not cache_available(cache_dir, identity(args.sample_id, video_path, protocol)):
         raise ValueError(f"No valid decoded-frame cache entry for {args.sample_id}")
-    model_info = verify_model(model_dir, "qwen")
+    model_info = None if args.frames_only else verify_model(model_dir, "qwen")
     if args.verify_only:
         print(json.dumps({"dataset": dataset, "sample_id": args.sample_id, "split": args.split,
                           "video_path": str(video_path), "index_csv": str(index_csv),
                           "cache_dir": str(cache_dir), "model": model_info,
                           "prompt_style": prompt_style,
                           "output_dir": str(output_dir)}, indent=2))
+        return 0
+
+    if args.frames_only:
+        decoder = TimedVideoDecoder(10, cache_dir=cache_dir, cache_only=True)
+        try:
+            _, videos, _ = decoder.decode([], args.sample_id, video_path, protocol)
+        finally:
+            decoder.close()
+        frames = rgb_frames(videos[0])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = output_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {
+            "dataset": dataset, "sample_id": args.sample_id, "split": args.split}
+        if metadata.get("sample_id") != args.sample_id:
+            raise ValueError(f"{output_dir}: metadata belongs to another clip")
+        save_original_frames(output_dir, frames)
+        metadata["frames"] = len(frames)
+        metadata["original_frames"] = "frames/frame_000.png onward and frames_contact_sheet.png"
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        print(f"Frames-only output ready: {output_dir}", flush=True)
         return 0
 
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -199,6 +250,7 @@ def main(dataset: str = "meld") -> int:
     save_layer_summary(output_dir / "layer_summary.csv", attention, video_mask)
     save_visual_scores(output_dir / "visual_token_attention.csv", visual)
     plot_summaries(output_dir, attention, video_mask, visual)
+    save_original_frames(output_dir, frames)
     save_every_frame_overlays(output_dir, frames, visual, temporal_patch)
     (output_dir / "metadata.json").write_text(json.dumps({
         "dataset": dataset, "sample_id": args.sample_id, "split": args.split,
@@ -211,6 +263,7 @@ def main(dataset: str = "meld") -> int:
         "video_grid_thw": [temporal, height, width],
         "spatial_merge_size": merge, "temporal_patch_size": temporal_patch,
         "overlay_scale": "one raw attention maximum shared across all layers and frames",
+        "original_frames": "frames/frame_000.png onward and frames_contact_sheet.png",
         "environment": environment,
     }, indent=2) + "\n")
     print(f"Saved {attention.shape[0]} per-layer overlays of all {len(frames)} frames to "

@@ -17,6 +17,44 @@ from cluster import visualize_meld_full_attention as visualize
 
 
 class MeldAttentionVisualizationTests(unittest.TestCase):
+    def test_saves_original_frames_and_contact_sheet(self):
+        individual = []
+        contact = []
+
+        class Axis:
+            def imshow(self, image, **_kwargs):
+                self.shape = tuple(image.shape)
+
+            def set_title(self, *_args, **_kwargs):
+                pass
+
+            def set_xticks(self, *_args):
+                pass
+
+            def set_yticks(self, *_args):
+                pass
+
+        axes = SimpleNamespace(flat=[Axis(), Axis()])
+        figure = SimpleNamespace(suptitle=lambda *_args, **_kwargs: None,
+                                 tight_layout=lambda **_kwargs: None,
+                                 savefig=lambda path, **_kwargs: contact.append(path.name))
+        pyplot = SimpleNamespace(subplots=lambda *_args, **_kwargs: (figure, axes),
+                                 imsave=lambda path, frame: individual.append(
+                                     (path.name, tuple(frame.shape))),
+                                 close=lambda *_args: None)
+        matplotlib = ModuleType("matplotlib")
+        matplotlib.__path__ = []
+        matplotlib.use = lambda *_args: None
+        matplotlib.pyplot = pyplot
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            sys.modules, {"matplotlib": matplotlib, "matplotlib.pyplot": pyplot}
+        ):
+            visualize.save_original_frames(
+                Path(folder), np.zeros((2, 8, 8, 3), dtype=np.uint8))
+        self.assertEqual(individual, [("frame_000.png", (8, 8, 3)),
+                                      ("frame_001.png", (8, 8, 3))])
+        self.assertEqual(contact, ["frames_contact_sheet.png"])
+
     def test_temporal_groups_cover_each_decoded_frame(self):
         self.assertEqual(visualize.frame_group_indices(4, 2, 2), [0, 0, 1, 1])
         with self.assertRaisesRegex(ValueError, "do not match"):
@@ -85,6 +123,38 @@ class MeldAttentionVisualizationTests(unittest.TestCase):
                   patch.object(visualize, "cache_available", return_value=True),
                   patch.object(visualize, "verify_model", return_value={"model": "7b"})):
                 self.assertEqual(visualize.main(), 0)
+
+    def test_frames_only_uses_cache_without_loading_gpu(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            baseline = root / "results" / "qwen2_5_vl_7b_meld_emotion_prompt_cache_success"
+            index = baseline / "indexes" / "meld_test_index.csv"
+            index.parent.mkdir(parents=True)
+            video = root / "clip.mp4"
+            video.touch()
+            with index.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("sample_id", "video_path", "utterance"))
+                writer.writeheader()
+                writer.writerow({"sample_id": "test_dia1_utt0", "video_path": str(video),
+                                 "utterance": "hello"})
+            cache = root / "datasets" / "meld" / "decoded_qwen_6fps_224_v1"
+            (cache / "frames").mkdir(parents=True)
+            (cache / "successful_decodes.csv").write_text("split,sample_id,cache_path\n")
+            output_dir = root / "attention"
+            argv = ["visualize.py", "--root", str(root), "--sample-id",
+                    "test_dia1_utt0", "--frames-only", "--output-dir", str(output_dir)]
+            with (patch.object(sys, "argv", argv),
+                  patch.object(visualize, "identity", return_value={}),
+                  patch.object(visualize, "cache_available", return_value=True),
+                  patch.object(visualize, "verify_model", side_effect=AssertionError("model loaded")),
+                  patch.object(visualize, "TimedVideoDecoder") as decoder,
+                  patch.object(visualize, "rgb_frames", return_value=np.zeros(
+                      (2, 8, 8, 3), dtype=np.uint8)),
+                  patch.object(visualize, "save_original_frames") as save):
+                decoder.return_value.decode.return_value = (None, [("cached", {})], {})
+                self.assertEqual(visualize.main(), 0)
+            save.assert_called_once()
+            self.assertEqual(json.loads((output_dir / "metadata.json").read_text())["frames"], 2)
 
     def test_mosei_verify_only_selects_matching_baseline_and_prompt(self):
         with tempfile.TemporaryDirectory() as folder:
