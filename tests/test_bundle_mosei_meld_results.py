@@ -6,8 +6,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.analysis.bundle_mosei_meld_results import RESULT_DIRS, choose_sample_id
+from scripts.analysis.bundle_mosei_meld_results import RESULT_DIRS, choose_sample_id, visualize
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -15,6 +16,15 @@ SCRIPT = REPO / "scripts" / "analysis" / "bundle_mosei_meld_results.py"
 
 
 class BundleResultsTests(unittest.TestCase):
+    def test_dash_prefixed_mosei_id_is_one_argument(self):
+        with patch("scripts.analysis.bundle_mosei_meld_results.subprocess.run") as run:
+            visualize(Path("/tmp/project"), "mosei", "-6rXp3zJ3kc[3]",
+                      Path("/tmp/attention"), verify_only=True)
+        command = run.call_args.args[0]
+        self.assertIn("--sample-id=-6rXp3zJ3kc[3]", command)
+        self.assertNotIn("-6rXp3zJ3kc[3]", command)
+        self.assertIn("--verify-only", command)
+
     def test_chooses_first_cached_baseline_test_sample(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

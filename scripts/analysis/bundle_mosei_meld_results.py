@@ -89,7 +89,7 @@ def visualize(root: Path, dataset: str, sample_id: str, destination: Path,
               verify_only: bool = False) -> None:
     script = REPO / "cluster" / f"visualize_{dataset}_full_attention.py"
     command = [sys.executable, "-u", str(script), "--root", str(root),
-               "--split", "test", "--sample-id", sample_id,
+               "--split", "test", f"--sample-id={sample_id}",
                "--output-dir", str(destination)]
     if dataset == "mosei":
         command.extend(("--prompt-style", "emotion_multilabel_task"))
