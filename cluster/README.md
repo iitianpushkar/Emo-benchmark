@@ -62,6 +62,9 @@ raw scores and layer summaries. Qwen's temporal patching
 can assign the same decoder-level map to two adjacent frames.
 For an existing heatmap folder, `--frames-only --output-dir PATH` adds the
 original frame PNGs from cache without loading the GPU model.
+Use `--rerender-overlays --output-dir PATH --overlay-opacity 0.25` to redraw the
+per-layer frame overlays from the saved `visual_token_attention.csv` and cached
+frames without another GPU forward pass. This also saves the original frames.
 
 ## MELD face-only Qwen2.5-VL-3B experiment
 

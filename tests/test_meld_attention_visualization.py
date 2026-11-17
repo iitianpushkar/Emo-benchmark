@@ -156,6 +156,56 @@ class MeldAttentionVisualizationTests(unittest.TestCase):
             save.assert_called_once()
             self.assertEqual(json.loads((output_dir / "metadata.json").read_text())["frames"], 2)
 
+    def test_rerenders_saved_attention_with_lower_opacity_without_gpu(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            baseline = root / "results" / "qwen2_5_vl_7b_meld_emotion_prompt_cache_success"
+            index = baseline / "indexes" / "meld_test_index.csv"
+            index.parent.mkdir(parents=True)
+            video = root / "clip.mp4"
+            video.touch()
+            with index.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("sample_id", "video_path", "utterance"))
+                writer.writeheader()
+                writer.writerow({"sample_id": "test_dia1_utt0", "video_path": str(video),
+                                 "utterance": "hello"})
+            cache = root / "datasets" / "meld" / "decoded_qwen_6fps_224_v1"
+            (cache / "frames").mkdir(parents=True)
+            (cache / "successful_decodes.csv").write_text("split,sample_id,cache_path\n")
+            output_dir = root / "attention"
+            output_dir.mkdir()
+            (output_dir / "metadata.json").write_text(json.dumps({
+                "sample_id": "test_dia1_utt0", "layers": 2,
+                "video_grid_thw": [1, 4, 4], "spatial_merge_size": 2,
+                "temporal_patch_size": 2}))
+            with (output_dir / "visual_token_attention.csv").open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=(
+                    "layer", "temporal_group", "row", "column", "attention"))
+                writer.writeheader()
+                for layer in range(2):
+                    for row in range(2):
+                        for column in range(2):
+                            writer.writerow({"layer": layer, "temporal_group": 0,
+                                             "row": row, "column": column,
+                                             "attention": 0.1})
+            argv = ["visualize.py", "--root", str(root), "--sample-id",
+                    "test_dia1_utt0", "--rerender-overlays", "--overlay-opacity", "0.2",
+                    "--output-dir", str(output_dir)]
+            with (patch.object(sys, "argv", argv),
+                  patch.object(visualize, "identity", return_value={}),
+                  patch.object(visualize, "cache_available", return_value=True),
+                  patch.object(visualize, "verify_model", side_effect=AssertionError("model loaded")),
+                  patch.object(visualize, "TimedVideoDecoder") as decoder,
+                  patch.object(visualize, "rgb_frames", return_value=np.zeros(
+                      (2, 8, 8, 3), dtype=np.uint8)),
+                  patch.object(visualize, "save_original_frames"),
+                  patch.object(visualize, "save_every_frame_overlays") as save):
+                decoder.return_value.decode.return_value = (None, [("cached", {})], {})
+                self.assertEqual(visualize.main(), 0)
+            self.assertEqual(save.call_args.args[2].shape, (2, 1, 2, 2))
+            self.assertEqual(save.call_args.args[4], 0.2)
+            self.assertEqual(json.loads((output_dir / "metadata.json").read_text())["overlay_opacity"], 0.2)
+
     def test_mosei_verify_only_selects_matching_baseline_and_prompt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

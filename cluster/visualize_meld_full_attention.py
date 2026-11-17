@@ -77,7 +77,7 @@ def save_original_frames(output_dir: Path, frames: np.ndarray) -> None:
 
 
 def save_every_frame_overlays(output_dir: Path, frames: np.ndarray, visual: np.ndarray,
-                              temporal_patch_size: int) -> None:
+                              temporal_patch_size: int, overlay_opacity: float = 0.25) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -99,7 +99,8 @@ def save_every_frame_overlays(output_dir: Path, frames: np.ndarray, visual: np.n
             heat = visual[layer, group] / shared_max
             axis.imshow(frames[frame_index])
             axis.imshow(heat, cmap="inferno", vmin=0, vmax=1,
-                        interpolation="bilinear", alpha=np.clip(heat * 0.45, 0, 0.45))
+                        interpolation="bilinear",
+                        alpha=np.clip(heat * overlay_opacity, 0, overlay_opacity))
             axis.set_title(f"Frame {frame_index} · group {group}", fontsize=9)
             axis.set_xticks([])
             axis.set_yticks([])
@@ -109,6 +110,26 @@ def save_every_frame_overlays(output_dir: Path, frames: np.ndarray, visual: np.n
         figure.savefig(overlay_dir / f"layer_{layer:02d}.png", dpi=150)
         plt.close(figure)
         print(f"Saved attention overlay for decoder layer {layer:02d}", flush=True)
+
+
+def read_visual_scores(path: Path, layers: int, temporal: int,
+                       rows: int, columns: int) -> np.ndarray:
+    """Restore the exact attention grid saved during the original GPU pass."""
+    visual = np.full((layers, temporal, rows, columns), np.nan, dtype=np.float32)
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if tuple(reader.fieldnames or ()) != ("layer", "temporal_group", "row", "column", "attention"):
+            raise ValueError(f"{path}: unexpected attention CSV columns")
+        for record in reader:
+            index = tuple(int(record[key]) for key in ("layer", "temporal_group", "row", "column"))
+            if any(value < 0 or value >= bound for value, bound in zip(index, visual.shape)):
+                raise ValueError(f"{path}: attention index outside saved grid: {index}")
+            if np.isfinite(visual[index]):
+                raise ValueError(f"{path}: duplicate attention index: {index}")
+            visual[index] = float(record["attention"])
+    if not np.isfinite(visual).all() or (visual < 0).any():
+        raise ValueError(f"{path}: missing, nonfinite, or negative attention values")
+    return visual
 
 
 def main(dataset: str = "meld") -> int:
@@ -131,9 +152,16 @@ def main(dataset: str = "meld") -> int:
     parser.add_argument("--decoded-cache-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--verify-only", action="store_true")
-    parser.add_argument("--frames-only", action="store_true",
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--frames-only", action="store_true",
                         help="Save decoded frame PNGs from cache without loading the GPU model")
+    modes.add_argument("--rerender-overlays", action="store_true",
+                       help="Redraw saved attention heatmaps from CSV and cached frames without the GPU model")
+    parser.add_argument("--overlay-opacity", type=float, default=0.25,
+                        help="Maximum heatmap opacity from 0 to 1 (default: 0.25)")
     args = parser.parse_args()
+    if not 0 <= args.overlay_opacity <= 1:
+        parser.error("--overlay-opacity must be between 0 and 1")
 
     root = args.root.expanduser().resolve()
     prompt_style = "meld_emotion_task" if dataset == "meld" else args.prompt_style
@@ -158,7 +186,7 @@ def main(dataset: str = "meld") -> int:
     protocol["prompt_style"] = prompt_style
     if not cache_available(cache_dir, identity(args.sample_id, video_path, protocol)):
         raise ValueError(f"No valid decoded-frame cache entry for {args.sample_id}")
-    model_info = None if args.frames_only else verify_model(model_dir, "qwen")
+    model_info = None if args.frames_only or args.rerender_overlays else verify_model(model_dir, "qwen")
     if args.verify_only:
         print(json.dumps({"dataset": dataset, "sample_id": args.sample_id, "split": args.split,
                           "video_path": str(video_path), "index_csv": str(index_csv),
@@ -167,7 +195,7 @@ def main(dataset: str = "meld") -> int:
                           "output_dir": str(output_dir)}, indent=2))
         return 0
 
-    if args.frames_only:
+    if args.frames_only or args.rerender_overlays:
         decoder = TimedVideoDecoder(10, cache_dir=cache_dir, cache_only=True)
         try:
             _, videos, _ = decoder.decode([], args.sample_id, video_path, protocol)
@@ -180,11 +208,26 @@ def main(dataset: str = "meld") -> int:
             "dataset": dataset, "sample_id": args.sample_id, "split": args.split}
         if metadata.get("sample_id") != args.sample_id:
             raise ValueError(f"{output_dir}: metadata belongs to another clip")
+        if args.rerender_overlays:
+            temporal, height, width = map(int, metadata["video_grid_thw"])
+            merge = int(metadata["spatial_merge_size"])
+            temporal_patch = int(metadata["temporal_patch_size"])
+            if height % merge or width % merge:
+                raise ValueError("Saved video grid is incompatible with spatial merging")
+            visual = read_visual_scores(output_dir / "visual_token_attention.csv",
+                                        int(metadata["layers"]), temporal,
+                                        height // merge, width // merge)
+            frame_group_indices(len(frames), temporal, temporal_patch)
         save_original_frames(output_dir, frames)
+        if args.rerender_overlays:
+            save_every_frame_overlays(output_dir, frames, visual, temporal_patch,
+                                      args.overlay_opacity)
+            metadata["overlay_opacity"] = args.overlay_opacity
         metadata["frames"] = len(frames)
         metadata["original_frames"] = "frames/frame_000.png onward and frames_contact_sheet.png"
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-        print(f"Frames-only output ready: {output_dir}", flush=True)
+        print(f"{'Rerendered overlays' if args.rerender_overlays else 'Frames-only output'} "
+              f"ready: {output_dir}", flush=True)
         return 0
 
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -251,7 +294,7 @@ def main(dataset: str = "meld") -> int:
     save_visual_scores(output_dir / "visual_token_attention.csv", visual)
     plot_summaries(output_dir, attention, video_mask, visual)
     save_original_frames(output_dir, frames)
-    save_every_frame_overlays(output_dir, frames, visual, temporal_patch)
+    save_every_frame_overlays(output_dir, frames, visual, temporal_patch, args.overlay_opacity)
     (output_dir / "metadata.json").write_text(json.dumps({
         "dataset": dataset, "sample_id": args.sample_id, "split": args.split,
         "video_path": str(video_path),
@@ -263,6 +306,7 @@ def main(dataset: str = "meld") -> int:
         "video_grid_thw": [temporal, height, width],
         "spatial_merge_size": merge, "temporal_patch_size": temporal_patch,
         "overlay_scale": "one raw attention maximum shared across all layers and frames",
+        "overlay_opacity": args.overlay_opacity,
         "original_frames": "frames/frame_000.png onward and frames_contact_sheet.png",
         "environment": environment,
     }, indent=2) + "\n")
